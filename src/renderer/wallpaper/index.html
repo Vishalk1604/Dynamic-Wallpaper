@@ -1,0 +1,140 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'" />
+    <title>Dynamic Wallpaper</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #000;
+        cursor: none;
+      }
+      #probe {
+        position: absolute;
+        inset: 0;
+        font-family: Consolas, "Cascadia Mono", monospace;
+        color: #fff;
+      }
+      /* Edge rules: if any of these is clipped, the window is not covering the monitor. */
+      .edge {
+        position: absolute;
+        background: #ff3b30;
+      }
+      .edge.top,
+      .edge.bottom {
+        left: 0;
+        width: 100%;
+        height: 2px;
+      }
+      .edge.left,
+      .edge.right {
+        top: 0;
+        height: 100%;
+        width: 2px;
+      }
+      .edge.top {
+        top: 0;
+      }
+      .edge.bottom {
+        bottom: 0;
+      }
+      .edge.left {
+        left: 0;
+      }
+      .edge.right {
+        right: 0;
+      }
+      .corner {
+        position: absolute;
+        width: 48px;
+        height: 48px;
+        border: 3px solid #34c759;
+      }
+      .corner.tl {
+        top: 0;
+        left: 0;
+        border-right: 0;
+        border-bottom: 0;
+      }
+      .corner.tr {
+        top: 0;
+        right: 0;
+        border-left: 0;
+        border-bottom: 0;
+      }
+      .corner.bl {
+        bottom: 0;
+        left: 0;
+        border-right: 0;
+        border-top: 0;
+      }
+      .corner.br {
+        bottom: 0;
+        right: 0;
+        border-left: 0;
+        border-top: 0;
+      }
+      #readout {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        text-align: center;
+        line-height: 1.7;
+        font-size: 20px;
+        text-shadow: 0 0 12px currentColor;
+        white-space: pre;
+      }
+      #label {
+        font-size: 34px;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        margin-bottom: 12px;
+      }
+      #pulse {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        width: 220px;
+        height: 220px;
+        margin: -110px 0 0 -110px;
+        border-radius: 50%;
+        opacity: 0.16;
+        animation: breathe 2.4s ease-in-out infinite;
+      }
+      @keyframes breathe {
+        0%,
+        100% {
+          transform: scale(0.75);
+        }
+        50% {
+          transform: scale(1.15);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="probe">
+      <div id="pulse"></div>
+      <div class="edge top"></div>
+      <div class="edge bottom"></div>
+      <div class="edge left"></div>
+      <div class="edge right"></div>
+      <div class="corner tl"></div>
+      <div class="corner tr"></div>
+      <div class="corner bl"></div>
+      <div class="corner br"></div>
+      <div id="readout"><div id="label">waiting for display info…</div><div id="detail"></div></div>
+    </div>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
