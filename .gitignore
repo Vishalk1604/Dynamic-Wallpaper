@@ -1,0 +1,49 @@
+# Reference material — third-party project, deliberately excluded from this repo.
+# Kept locally for visual comparison only; no code from it is used here.
+multitab-particle-bridge-main/
+
+# Dependencies
+node_modules/
+.pnp/
+.pnp.js
+
+# Build output
+out/
+dist/
+build/
+release/
+*.tsbuildinfo
+
+# Electron / vite caches
+.vite/
+.electron-vite/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Editor / OS
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+ehthumbs.db
+
+# Windows shortcuts / junk
+*.lnk
+
+# Local environment
+.env
+.env.local
+.env.*.local
+
+# Local scratch
+scratch/
+tmp/
