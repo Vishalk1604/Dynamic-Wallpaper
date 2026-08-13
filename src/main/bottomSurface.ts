@@ -25,6 +25,7 @@
  */
 import { BrowserWindow } from "electron";
 import { join } from "node:path";
+import type { SurfacePayload } from "@shared/types";
 import type { Bounds, DisplayInfo, Layout } from "./displays";
 import { IconHost } from "./iconHost";
 import {
@@ -49,6 +50,9 @@ const SINK_INTERVAL_MS = 1000;
  */
 const ADOPT_ICON_HOST = process.env["DW_ADOPT_ICON_HOST"] === "1";
 
+/** Diagnostics overlay in each pane. */
+const SHOW_HUD = process.env["DW_HUD"] === "1";
+
 type Pane = {
   displayId: number;
   window: BrowserWindow;
@@ -64,6 +68,15 @@ export class BottomSurface {
   private disposed = false;
   private paused = false;
   private readonly iconHost = new IconHost();
+
+  /**
+   * Shared across every pane, and deliberately fixed for the process lifetime: the panes each run
+   * the whole simulation independently, and identical results require an identical seed and a common
+   * time origin. Recreating panes after a display change must not reset these, or the blobs would
+   * visibly jump.
+   */
+  private readonly seed = (Date.now() ^ (Math.random() * 0xffffffff)) >>> 0;
+  private readonly epochMs = Date.now();
 
   get paneCount(): number {
     return this.panes.length;
@@ -176,7 +189,14 @@ export class BottomSurface {
     // can re-clamp the geometry, and verified rather than assumed: Chromium has several code paths
     // that quietly resize a new window to fit a work area.
     this.placePane(hwnd, region);
-    window.webContents.send("wallpaper:layout", { layout, region });
+    const payload: SurfacePayload = {
+      layout,
+      region,
+      seed: this.seed,
+      epochMs: this.epochMs,
+      hud: SHOW_HUD,
+    };
+    window.webContents.send("wallpaper:layout", payload);
   }
 
   /**

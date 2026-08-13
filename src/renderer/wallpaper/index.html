@@ -15,102 +15,35 @@
         height: 100%;
         overflow: hidden;
         background: #000;
+        cursor: default;
       }
       #gl {
-        position: absolute;
-        inset: 0;
+        display: block;
         width: 100%;
         height: 100%;
-        display: block;
       }
-      #stage {
+      /* Diagnostics overlay, enabled by the main process via a data attribute so the shipped
+         wallpaper shows nothing but the simulation. */
+      #hud {
         position: absolute;
-        inset: 0;
-      }
-      /* One outlined panel per monitor, positioned as a percentage of the virtual desktop so the
-         render scale is irrelevant. Gaps between panels are dead zones of the bounding box and are
-         never visible on a real screen. Outlined rather than filled so the animated layer beneath
-         stays visible. */
-      .screen {
-        position: absolute;
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
-        font-family: Consolas, "Cascadia Mono", monospace;
-        color: #fff;
-        overflow: hidden;
-        border: 0.5vh solid #fff;
-        background: rgba(0, 0, 0, 0.35);
-      }
-      .screen .label {
-        font-size: 2.2vh;
-        font-weight: 700;
-        letter-spacing: 0.04em;
-        margin-bottom: 1.2vh;
-        text-align: center;
-        text-shadow: 0 0 1vh #000;
-      }
-      .screen .detail {
-        font-size: 1.3vh;
-        line-height: 1.75;
-        white-space: pre;
-        text-align: center;
-        text-shadow: 0 0 1vh #000;
-      }
-      .screen .bracket {
-        position: absolute;
-        width: 3vh;
-        height: 3vh;
-        border: 0.45vh solid #fff;
-      }
-      .tl {
         top: 0;
-        left: 0;
-        border-right: 0;
-        border-bottom: 0;
-      }
-      .tr {
-        top: 0;
-        right: 0;
-        border-left: 0;
-        border-bottom: 0;
-      }
-      .bl {
-        bottom: 0;
-        left: 0;
-        border-right: 0;
-        border-top: 0;
-      }
-      .br {
-        bottom: 0;
-        right: 0;
-        border-left: 0;
-        border-top: 0;
-      }
-      #banner,
-      #glfps {
-        position: absolute;
         left: 0;
         padding: 6px 10px;
-        font-family: Consolas, monospace;
+        font-family: Consolas, "Cascadia Mono", monospace;
         font-size: 13px;
-        color: #fff;
-        background: rgba(0, 0, 0, 0.7);
+        color: #cbd5e1;
+        background: rgba(0, 0, 0, 0.65);
+        pointer-events: none;
+        display: none;
       }
-      #banner {
-        top: 0;
-      }
-      #glfps {
-        top: 28px;
+      #hud[data-enabled] {
+        display: block;
       }
     </style>
   </head>
   <body>
     <canvas id="gl"></canvas>
-    <div id="stage"></div>
-    <div id="banner">waiting for layout…</div>
-    <div id="glfps">renderer starting…</div>
+    <div id="hud"></div>
   </body>
   <script type="module" src="./main.ts"></script>
 </html>

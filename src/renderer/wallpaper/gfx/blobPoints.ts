@@ -1,0 +1,98 @@
+/**
+ * Draws the particle cloud as additively blended soft sprites.
+ *
+ * Each particle is a single GL point shaded as a radial falloff rather than a textured quad, which
+ * keeps it to one draw call for the whole system with no texture upload. Additive blending is what
+ * makes density read as brightness: where particles overlap the colour accumulates, so the core of a
+ * blob turns near-white and the fringes stay tinted, and the bloom pass then blooms the bright core.
+ */
+import {
+  AdditiveBlending,
+  BufferAttribute,
+  BufferGeometry,
+  Points,
+  ShaderMaterial,
+} from "three";
+import type { BlobWorld } from "../sim/world";
+
+const VERTEX_SHADER = /* glsl */ `
+attribute float size;
+attribute float alpha;
+attribute vec3 colour;
+
+varying float vAlpha;
+varying vec3 vColour;
+
+uniform float pixelScale;
+
+void main() {
+  vAlpha = alpha;
+  vColour = colour;
+  vec4 viewPosition = modelViewMatrix * vec4(position, 1.0);
+  gl_Position = projectionMatrix * viewPosition;
+  gl_PointSize = size * pixelScale;
+}
+`;
+
+const FRAGMENT_SHADER = /* glsl */ `
+precision highp float;
+
+varying float vAlpha;
+varying vec3 vColour;
+
+void main() {
+  // Radial falloff from the point's centre. Squaring it tightens the core and softens the halo,
+  // which reads more like a glowing mote than a flat disc.
+  float d = length(gl_PointCoord - vec2(0.5)) * 2.0;
+  if (d > 1.0) discard;
+  float falloff = 1.0 - d;
+  float intensity = falloff * falloff * vAlpha;
+  if (intensity < 0.004) discard;
+  gl_FragColor = vec4(vColour * intensity, intensity);
+}
+`;
+
+export class BlobPoints {
+  readonly points: Points<BufferGeometry, ShaderMaterial>;
+  private readonly geometry: BufferGeometry;
+  private readonly material: ShaderMaterial;
+
+  constructor(world: BlobWorld, pixelScale: number) {
+    this.geometry = new BufferGeometry();
+    this.geometry.setAttribute("position", new BufferAttribute(world.positions, 3));
+    this.geometry.setAttribute("colour", new BufferAttribute(world.colours, 3));
+    this.geometry.setAttribute("size", new BufferAttribute(world.sizes, 1));
+    this.geometry.setAttribute("alpha", new BufferAttribute(world.alphas, 1));
+
+    // The particles span the whole virtual desktop while each pane only shows its own region.
+    // Frustum culling would test this single object's bounds and cull all or nothing, so it is
+    // disabled and per-point clipping is left to the GPU.
+    this.material = new ShaderMaterial({
+      vertexShader: VERTEX_SHADER,
+      fragmentShader: FRAGMENT_SHADER,
+      uniforms: { pixelScale: { value: pixelScale } },
+      blending: AdditiveBlending,
+      depthWrite: false,
+      depthTest: false,
+      transparent: true,
+    });
+
+    this.points = new Points(this.geometry, this.material);
+    this.points.frustumCulled = false;
+  }
+
+  /** Push the simulation's latest positions and colours to the GPU. */
+  sync(): void {
+    (this.geometry.getAttribute("position") as BufferAttribute).needsUpdate = true;
+    (this.geometry.getAttribute("colour") as BufferAttribute).needsUpdate = true;
+  }
+
+  setPixelScale(scale: number): void {
+    this.material.uniforms["pixelScale"].value = scale;
+  }
+
+  dispose(): void {
+    this.geometry.dispose();
+    this.material.dispose();
+  }
+}

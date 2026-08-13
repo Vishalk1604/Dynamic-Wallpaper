@@ -18,3 +18,20 @@ export type Layout = {
   /** Bounding box of all displays, in physical pixels. */
   virtualBounds: Bounds;
 };
+
+/**
+ * What each pane is told about itself and the simulation.
+ *
+ * `seed` and `epochMs` are shared by every pane so they can run the same deterministic simulation
+ * independently: each derives the same tick count from wall-clock time, with no per-frame IPC, which
+ * is what lets a particle cross a bezel without jumping.
+ */
+export type SurfacePayload = {
+  layout: Layout;
+  /** Region of virtual-desktop space this pane covers, in physical pixels. */
+  region: Bounds;
+  seed: number;
+  epochMs: number;
+  /** Show the diagnostics overlay. Off for the shipped wallpaper. */
+  hud: boolean;
+};

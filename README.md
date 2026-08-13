@@ -58,7 +58,7 @@ npm run dev
 
 - [x] Render surface covering every monitor, pinned beneath all application windows
 - [ ] Live display topology tracking (rotation, offset, add/remove, primary change, DPI)
-- [ ] Particle simulation and bloom rendering
+- [x] Particle simulation and bloom rendering
 - [ ] Cross-bezel continuity validation
 - [ ] Tray icon and settings app with themes
 - [ ] Installer
