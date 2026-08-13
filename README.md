@@ -57,9 +57,9 @@ npm run dev
 ## Roadmap
 
 - [x] Render surface covering every monitor, pinned beneath all application windows
-- [ ] Live display topology tracking (rotation, offset, add/remove, primary change, DPI)
+- [x] Live display topology tracking (rotation, offset, add/remove, primary change, DPI)
 - [x] Particle simulation and bloom rendering
-- [ ] Cross-bezel continuity validation
+- [x] Cross-bezel continuity validation
 - [ ] Tray icon and settings app with themes
 - [ ] Installer
 
