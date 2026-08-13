@@ -65,16 +65,28 @@ npm run dev
 
 ### A note on the wallpaper layer
 
-Windows 11 build 26200 offers no working way to render into the real wallpaper layer from a Chromium
-process. Reparenting into the shell's `WorkerW` stops Chromium compositing entirely, and painting into
-the desktop device context with GDI is silently discarded — even plain `FillRect` reports success and
-draws nothing. The measurements and everything ruled out are in
-[docs/desktop-layer-findings.md](docs/desktop-layer-findings.md).
+Windows 11 build 26200 offers no working way to render into the real wallpaper layer. Four approaches
+were built and measured, and all four fail:
+
+| Approach | Result |
+| --- | --- |
+| Reparent the Chromium window into the shell's `WorkerW` | attaches correctly, composites nothing |
+| Offscreen render, blit into the desktop DC with GDI | 60fps at 1.81ms/frame, draws nothing |
+| Plain `FillRect` into `WorkerW` / `Progman` DCs | reports success, draws nothing |
+| Reparent a classic Win32 window into the desktop hierarchy | composites nothing |
+
+The last one is the informative one: it is not a Chromium limitation. Windows composites no foreign
+child window in the desktop hierarchy on this build — only Explorer's own icon host renders.
+
+Adopting that icon host into our own window *does* layer the icons above the live wallpaper, but they
+are painted over within a second or two by the renderer's next frame. That mechanism is present
+behind `DW_ADOPT_ICON_HOST=1` and off by default. Full measurements, the geometry fix it needs, and a
+safety hazard around it are in [docs/desktop-layer-findings.md](docs/desktop-layer-findings.md).
 
 The surface is therefore a top-level window per monitor, pinned to the bottom of the z-order,
 non-activatable, click-through, and absent from the taskbar and Alt+Tab. Every application window
-draws above it. With desktop icons hidden it is indistinguishable from a real wallpaper; with icons
-enabled it would cover them, and "Show desktop" reveals the desktop over it.
+draws above it. **With desktop icons hidden it is indistinguishable from a real wallpaper; with icons
+enabled it covers them,** and "Show desktop" reveals the desktop over it.
 
 ## Settings
 

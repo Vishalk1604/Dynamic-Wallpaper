@@ -160,14 +160,49 @@ So this is not a Chromium limitation. **On this build, Windows composites no for
 the desktop hierarchy** — only Explorer's own `SHELLDLL_DefView` renders. A native presenter addon
 would have hit exactly the same wall, so the toolchain install was avoided.
 
-## What is left for true behind-icons rendering
+## Adopting the icon host: renders, but loses a repaint race
 
-**Adopt the icon host.** Invert the relationship: rather than placing our surface beneath the icons,
-`SetParent` Explorer's `SHELLDLL_DefView` into our own top-level window. Our window is top-level so
-Chromium composites it, and `DefView` demonstrably still renders, so the icons should draw above our
-content. This is the only remaining route that keeps a WebGL renderer. It temporarily moves a window
-inside Explorer's hierarchy, and icon click and drag handling would need to survive the surface being
-click-through.
+The one remaining idea that keeps a WebGL renderer is to invert the relationship — rather than place
+our surface beneath the icons, `SetParent` Explorer's `SHELLDLL_DefView` into our own top-level pane.
+Our pane stays top-level so Chromium composites it, and `DefView` is a plain child window, so it
+should draw over our content.
+
+It half works, and the half that fails is decisive.
+
+Getting the geometry right takes two steps. `SetParent` preserves a window's *local* coordinates, so
+adopting `DefView` into the primary pane moves it from screen `-1080,-534` to `0,0` on its own.
+That is not sufficient, because `DefView` and its `SysListView32` span the whole virtual desktop and
+the list view lays icons out at the primary monitor's offset *within* that space — `1080,534` here —
+which leaves the icons visibly displaced. Resizing both to the primary monitor's dimensions makes the
+list view reflow from its own top-left, and the icons then land correctly.
+
+At which point the icons genuinely render on top of the live WebGL animation. Verified in capture.
+
+They do not stay. The list view paints when invalidated; our renderer paints every frame at ~141 fps.
+Within a second or two the renderer has painted over the icons and they are gone — captures at t+4s
+and t+12s show them absent. Trying to fix it by forcing a re-layout with `LVM_ARRANGE` makes it
+worse: the icons vanish immediately, because that hands the race to the renderer even sooner.
+
+So the icons can be layered above the wallpaper, but not *kept* there, without a way to make the list
+view repaint in step with a 60 fps renderer. Continuous forced invalidation would flicker and burn
+CPU. The mechanism is left in the codebase behind `DW_ADOPT_ICON_HOST=1`, off by default, since only
+the repaint coordination is unsolved.
+
+### Safety hazard worth knowing
+
+Windows destroys child windows with their parent. While `DefView` is adopted it is a child of one of
+our panes, so **anything that kills the process without running its shutdown path takes the desktop
+icons with it** — `Stop-Process -Force` did exactly that during testing, and the icons stayed gone
+until Explorer was restarted.
+
+`IconHost.release()` is therefore wired to `before-quit`, `exit`, `SIGINT`, `SIGTERM` and
+`uncaughtException`, and `BottomSurface.dispose()` releases before destroying any pane. None of that
+survives a force kill, which is a further reason the feature stays off by default. Recovery is simply
+restarting Explorer:
+
+```powershell
+Stop-Process -Name explorer -Force
+```
 
 **Swap the actual wallpaper image.** Write each frame to disk and call
 `SystemParametersInfo(SPI_SETDESKWALLPAPER)`, or use the `IDesktopWallpaper` COM interface. This is

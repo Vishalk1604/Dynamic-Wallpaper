@@ -26,6 +26,7 @@
 import { BrowserWindow } from "electron";
 import { join } from "node:path";
 import type { Bounds, DisplayInfo, Layout } from "./displays";
+import { IconHost } from "./iconHost";
 import {
   HWND_BOTTOM,
   IsWindow,
@@ -41,12 +42,20 @@ import {
 /** How often the bottom-of-z-order position is re-asserted. */
 const SINK_INTERVAL_MS = 1000;
 
+/**
+ * Whether to reparent Explorer's icon host into our pane so the wallpaper renders behind the icons.
+ * Disabled unless explicitly requested: the icons stop being painted once the renderer's next frame
+ * lands, so enabling it currently loses the icons rather than layering them.
+ */
+const ADOPT_ICON_HOST = process.env["DW_ADOPT_ICON_HOST"] === "1";
+
 type Pane = {
   displayId: number;
   window: BrowserWindow;
   hwnd: number;
   /** Region of the virtual desktop this pane renders, in physical pixels. */
   region: Bounds;
+  primary: boolean;
 };
 
 export class BottomSurface {
@@ -54,19 +63,37 @@ export class BottomSurface {
   private sink: NodeJS.Timeout | null = null;
   private disposed = false;
   private paused = false;
+  private readonly iconHost = new IconHost();
 
   get paneCount(): number {
     return this.panes.length;
   }
 
+  get iconsAdopted(): boolean {
+    return this.iconHost.isAdopted;
+  }
+
   async apply(layout: Layout): Promise<void> {
     if (this.disposed) return;
 
-    // Panes are tied to geometry, so rebuild rather than trying to reconcile them.
+    // Panes are tied to geometry, so rebuild rather than trying to reconcile them. Releasing the
+    // icon host first is mandatory: destroying a pane that owns it would destroy the desktop icons
+    // along with it.
+    this.iconHost.release();
     this.destroyPanes();
 
     for (const display of layout.displays) {
       await this.createPane(display, layout);
+    }
+
+    // Off by default. Adopting the icon host does render icons above the wallpaper, but only until
+    // the renderer's next frame paints over them — within a second or two the icons are gone. Left
+    // in place, opt-in, because the mechanism is sound and only the repaint race is unsolved.
+    if (ADOPT_ICON_HOST) {
+      const primary = this.panes.find((p) => p.primary);
+      if (primary) {
+        this.iconHost.adopt(primary.hwnd, primary.region, layout.virtualBounds);
+      }
     }
 
     this.startSink();
@@ -110,7 +137,10 @@ export class BottomSurface {
       },
     });
 
-    window.setIgnoreMouseEvents(true);
+    // The primary pane must accept mouse input, because the adopted icon host covers it entirely and
+    // needs to receive clicks, selection drags and the desktop context menu. Other panes stay
+    // click-through so they never intercept anything.
+    window.setIgnoreMouseEvents(!display.primary);
     window.setMenuBarVisibility(false);
     // Keeps it out of Alt+Tab as well as the taskbar.
     window.setSkipTaskbar(true);
@@ -132,7 +162,7 @@ export class BottomSurface {
     // Clear any size constraints Chromium inferred from the work area. 0,0 means "no maximum".
     window.setMinimumSize(1, 1);
     window.setMaximumSize(0, 0);
-    this.panes.push({ displayId: display.id, window, hwnd, region });
+    this.panes.push({ displayId: display.id, window, hwnd, region, primary: display.primary });
 
     const ready = new Promise<void>((resolve) => {
       window.webContents.once("did-finish-load", () => resolve());
@@ -242,6 +272,13 @@ export class BottomSurface {
     this.disposed = true;
     if (this.sink) clearInterval(this.sink);
     this.sink = null;
+    // Order matters: hand the icons back before the pane that owns them is destroyed.
+    this.iconHost.release();
     this.destroyPanes();
+  }
+
+  /** Emergency teardown for exit paths where async work is not possible. */
+  releaseIcons(): void {
+    this.iconHost.release();
   }
 }

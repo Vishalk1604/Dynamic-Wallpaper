@@ -49,6 +49,7 @@ async function start(): Promise<void> {
 
   record("\n=== surface ===");
   record(`panes: ${surface.paneCount}`);
+  record(`icons adopted (wallpaper renders behind them): ${surface.iconsAdopted}`);
   record(`quit with ${QUIT_ACCELERATOR}`);
 
   setTimeout(async () => {
@@ -84,6 +85,27 @@ app.whenReady().then(async () => {
 app.on("before-quit", () => {
   surface.dispose();
   globalShortcut.unregisterAll();
+});
+
+/**
+ * The icon host is a child of one of our panes while adopted, and Windows destroys child windows
+ * with their parent — so losing it would take the desktop icons with it until Explorer restarted.
+ * Every plausible exit path therefore hands it back. All of these are synchronous FFI calls, which
+ * is what makes them usable from `exit` and from a crash handler.
+ */
+process.on("exit", () => surface.releaseIcons());
+process.on("SIGINT", () => {
+  surface.releaseIcons();
+  app.quit();
+});
+process.on("SIGTERM", () => {
+  surface.releaseIcons();
+  app.quit();
+});
+process.on("uncaughtException", (error) => {
+  console.error("uncaught exception, releasing icon host first", error);
+  surface.releaseIcons();
+  app.quit();
 });
 
 // Registering a listener at all overrides Electron's default "quit when no windows remain".

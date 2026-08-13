@@ -24,6 +24,17 @@ export const FindWindowExW = user32.func("__stdcall", "FindWindowExW", "uintptr_
   "str16", // lpszWindow
 ]);
 
+export const SendMessageW = user32.func("__stdcall", "SendMessageW", "intptr_t", [
+  "uintptr_t", // hWnd
+  "uint", // Msg
+  "uintptr_t", // wParam
+  "intptr_t", // lParam
+]);
+
+/** LVM_ARRANGE — re-runs a list view's icon layout and repaints it. */
+export const LVM_ARRANGE = 0x1000 + 22;
+export const LVA_DEFAULT = 0x0000;
+
 export const SendMessageTimeoutW = user32.func("__stdcall", "SendMessageTimeoutW", "intptr_t", [
   "uintptr_t", // hWnd
   "uint", // Msg
@@ -81,6 +92,14 @@ export const SetWindowLongPtrW = user32.func("__stdcall", "SetWindowLongPtrW", "
 export const IsWindow = user32.func("__stdcall", "IsWindow", "bool", ["uintptr_t"]);
 
 export const IsWindowVisible = user32.func("__stdcall", "IsWindowVisible", "bool", ["uintptr_t"]);
+
+export const InvalidateRect = user32.func("__stdcall", "InvalidateRect", "bool", [
+  "uintptr_t", // hWnd
+  "uintptr_t", // lpRect (NULL for whole window)
+  "bool", // bErase
+]);
+
+export const UpdateWindow = user32.func("__stdcall", "UpdateWindow", "bool", ["uintptr_t"]);
 
 export const RedrawWindow = user32.func("__stdcall", "RedrawWindow", "bool", [
   "uintptr_t", // hWnd
