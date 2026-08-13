@@ -69,8 +69,15 @@ class Pane {
     } else if (this.world.wellCount !== wells.length) {
       // Particle count is tied to the number of wells, so a display being added or removed needs a
       // fresh world; anything else can be reconfigured in place.
-      this.points?.dispose();
-      this.points = null;
+      //
+      // The old points must leave the scene graph before being disposed. Disposing only frees the
+      // geometry and material — the object itself stays in the scene, so skipping the removal leaves
+      // a disposed object being drawn alongside its replacement.
+      if (this.points) {
+        this.stage.scene.remove(this.points.points);
+        this.points.dispose();
+        this.points = null;
+      }
       this.world = new BlobWorld(wells, DEFAULT_SIM_CONFIG, payload.seed);
     } else {
       this.world.reconfigure(wells);
