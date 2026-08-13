@@ -40,16 +40,6 @@ export type SimConfig = {
   escapeFactor: number;
   /** How fast a transferred particle takes on its new well's colour, per second. */
   colourBlend: number;
-  /**
-   * Multiplier on the pull from wells other than a particle's own.
-   *
-   * This is an honest exaggeration, not physics. Tidal distortion scales with (blobRadius / distance)
-   * cubed, and with ~190px blobs about 1500px apart that is roughly 0.2% — completely invisible. Real
-   * gravity at desktop scale simply does nothing observable. Boosting only the foreign wells keeps
-   * each blob's internal orbits at their true speed while making the lean toward its neighbour, and
-   * the stream of particles across the gap, actually visible.
-   */
-  crossWellBoost: number;
   timeStep: number;
 };
 
@@ -57,17 +47,21 @@ export const DEFAULT_SIM_CONFIG: SimConfig = {
   gravity: 5200,
   softening: 26,
   particlesPerWell: 8000,
-  blobRadius: 210,
+  // Large relative to the gap between screens on purpose. This is what makes the interaction real
+  // rather than faked: the balance point between two equal wells sits midway between them, so the
+  // clouds have to be big enough to actually reach it before any particle can cross.
+  blobRadius: 380,
   drag: 0.994,
   // Kept low on purpose. This is the knob that holds the cloud together, and it directly opposes the
   // neighbouring well's pull — at 1.5 it flattened the lean between blobs to about 20px, which barely
   // read as interaction at all. Low enough to let the field distort the cloud, with drag and the
   // escape-and-respawn rule providing the remaining stability.
   orbitCorrection: 0.6,
-  captureFactor: 2.1,
+  // Generous, so the outer fringe of each cloud is left unbound and free to drift toward the
+  // neighbouring screen. This is what produces the stream across the bezel.
+  captureFactor: 2.4,
   escapeFactor: 9,
   colourBlend: 0.5,
-  crossWellBoost: 70,
   timeStep: 1 / 120,
 };
 
@@ -194,15 +188,7 @@ export class BlobWorld {
   }
 
   private step(): void {
-    const {
-      gravity,
-      softening,
-      timeStep: dt,
-      drag,
-      orbitCorrection,
-      blobRadius,
-      crossWellBoost,
-    } = this.config;
+    const { gravity, softening, timeStep: dt, drag, orbitCorrection, blobRadius } = this.config;
     const wells = this.wells;
     if (wells.length === 0) return;
 
@@ -224,7 +210,12 @@ export class BlobWorld {
       let nearest = 0;
       let nearestDist2 = Infinity;
 
-      const homeIndex = this.home[i];
+      // Every particle sees the identical field. An earlier version boosted the pull from wells other
+      // than the particle's own to make the interaction visible, which produced a bug worth
+      // remembering: as soon as a particle drifted close enough to be captured, its home flipped, the
+      // boost flipped with it, and it was yanked back. Particles piled up at a spurious equilibrium
+      // between the blobs instead of reaching either one. Per-particle asymmetry in a shared field is
+      // never safe; the lean now comes from displacing the wells themselves.
       for (let w = 0; w < wells.length; w++) {
         const well = wells[w];
         const dx = well.x - px;
@@ -236,10 +227,8 @@ export class BlobWorld {
           nearest = w;
         }
         const d2 = plain + soft2;
-        // G * M / d^3, so multiplying by the displacement gives the acceleration. Foreign wells are
-        // boosted because true tidal forces at this scale are far too small to see.
-        const boost = w === homeIndex ? 1 : crossWellBoost;
-        const inv = (gravity * well.mass * boost) / (d2 * Math.sqrt(d2));
+        // G * M / d^3, so multiplying by the displacement gives the acceleration.
+        const inv = (gravity * well.mass) / (d2 * Math.sqrt(d2));
         ax += dx * inv;
         ay += dy * inv;
         az += dz * inv;

@@ -150,10 +150,16 @@ export class BottomSurface {
       },
     });
 
-    // The primary pane must accept mouse input, because the adopted icon host covers it entirely and
-    // needs to receive clicks, selection drags and the desktop context menu. Other panes stay
-    // click-through so they never intercept anything.
-    window.setIgnoreMouseEvents(!display.primary);
+    // Click-through, always, unless the icon host has been adopted into this pane — in which case it
+    // covers the pane and needs the input itself.
+    //
+    // Panes are created resizable because Chromium otherwise pins them to a clamped size, and a
+    // resizable window that accepts the mouse can be dragged by its edges. Combined with an opaque
+    // pane swallowing clicks, that made the primary screen's wallpaper draggable and killed the
+    // desktop right-click menu. Click-through fixes both: hit-testing skips the pane entirely, so
+    // input lands on the desktop underneath as it should.
+    const wantsInput = ADOPT_ICON_HOST && display.primary;
+    window.setIgnoreMouseEvents(!wantsInput);
     window.setMenuBarVisibility(false);
     // Keeps it out of Alt+Tab as well as the taskbar.
     window.setSkipTaskbar(true);
