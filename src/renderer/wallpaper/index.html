@@ -14,7 +14,10 @@
         width: 100%;
         height: 100%;
         overflow: hidden;
-        background: #000;
+        /* Must stay transparent. The window is transparent so the desktop and its icons composite
+           through from underneath; an opaque background here paints over all of that and the pane
+           behaves exactly like a solid black window no matter what the window flags say. */
+        background: transparent;
         cursor: default;
       }
       #gl {

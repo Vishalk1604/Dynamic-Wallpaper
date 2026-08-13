@@ -123,8 +123,15 @@ export class BottomSurface {
       width: dip.width,
       height: dip.height,
       frame: false,
-      transparent: false,
-      backgroundColor: "#000000",
+      // Transparent so the real desktop — including its icons — composites through from underneath
+      // and the particles glow on top of it.
+      //
+      // The alternative was reparenting Explorer's icon host into the pane, which did layer the icons
+      // above the wallpaper but only until the renderer's next frame painted over them, and risked
+      // destroying the icons outright if the process was killed. Transparency gets the icons visible
+      // without touching Explorer at all.
+      transparent: true,
+      backgroundColor: "#00000000",
       show: false,
       skipTaskbar: true,
       focusable: false,

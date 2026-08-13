@@ -7,9 +7,10 @@
  * blob turns near-white and the fringes stay tinted, and the bloom pass then blooms the bright core.
  */
 import {
-  AdditiveBlending,
   BufferAttribute,
   BufferGeometry,
+  CustomBlending,
+  OneFactor,
   Points,
   ShaderMaterial,
 } from "three";
@@ -49,7 +50,13 @@ void main() {
   // A solid core out to roughly half the radius, then a short soft rim. A smooth radial falloff
   // instead of this makes every particle a faint smudge, and the cloud stops reading as individual
   // particles at all — the reference keeps its dots crisp and distinctly visible.
-  float intensity = smoothstep(1.0, 0.45, d) * vAlpha;
+  float core = smoothstep(1.0, 0.45, d);
+
+  // A wide, faint halo carrying the glow. This has to happen per particle: a post-processing bloom
+  // pass writes opaque alpha and would make the pane solid, hiding the desktop and its icons.
+  float halo = (1.0 - d) * (1.0 - d) * 0.4;
+
+  float intensity = (core + halo) * vAlpha;
   if (intensity < 0.004) discard;
 
   gl_FragColor = vec4(vColour * intensity * brightness, intensity);
@@ -79,7 +86,18 @@ export class BlobPoints {
         // Above 1 so colours stay vivid where particles overlap, rather than washing toward grey.
         brightness: { value: 1.35 },
       },
-      blending: AdditiveBlending,
+      // Premultiplied additive, rather than three's AdditiveBlending.
+      //
+      // The shader already outputs colour scaled by intensity, so the source is premultiplied.
+      // AdditiveBlending uses SrcAlpha for the source factor, which would multiply by intensity a
+      // second time — harmless against an opaque black background, but wrong over a transparent one.
+      // Adding alpha as well is what builds up coverage so dense areas occlude the desktop while
+      // sparse fringes stay see-through.
+      blending: CustomBlending,
+      blendSrc: OneFactor,
+      blendDst: OneFactor,
+      blendSrcAlpha: OneFactor,
+      blendDstAlpha: OneFactor,
       depthWrite: false,
       depthTest: false,
       transparent: true,

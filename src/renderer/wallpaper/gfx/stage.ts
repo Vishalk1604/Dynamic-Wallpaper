@@ -33,15 +33,24 @@ export class Stage {
   private readonly renderer: WebGLRenderer;
   private readonly composer: EffectComposer;
   private readonly bloom: UnrealBloomPass;
+  /**
+   * Bloom is mutually exclusive with a transparent pane, so it is off while the wallpaper needs the
+   * desktop to show through. The particle sprites carry a soft rim of their own, so the loss is
+   * modest.
+   */
+  private bloomEnabled = false;
 
   constructor(canvas: HTMLCanvasElement, region: Bounds, bloom: BloomSettings = DEFAULT_BLOOM) {
     this.renderer = new WebGLRenderer({
       canvas,
       antialias: false,
-      alpha: false,
+      // Transparent framebuffer: the pane is a transparent window, so anywhere no particle is drawn
+      // must stay clear for the desktop and its icons to show through.
+      alpha: true,
+      premultipliedAlpha: true,
       powerPreference: "high-performance",
     });
-    this.renderer.setClearColor(new Color(0x000000), 1);
+    this.renderer.setClearColor(new Color(0x000000), 0);
 
     this.camera = new OrthographicCamera();
     this.camera.position.set(0, 0, 4000);
@@ -85,7 +94,17 @@ export class Stage {
   }
 
   render(): void {
-    this.composer.render();
+    if (this.bloomEnabled) {
+      this.composer.render();
+      return;
+    }
+    // Direct render preserves the framebuffer's alpha channel. The composer's final full-screen pass
+    // writes opaque alpha, which makes the whole pane solid and hides the desktop beneath it.
+    this.renderer.render(this.scene, this.camera);
+  }
+
+  setBloomEnabled(enabled: boolean): void {
+    this.bloomEnabled = enabled;
   }
 
   get info(): string {
