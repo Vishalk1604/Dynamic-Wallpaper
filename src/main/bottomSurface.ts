@@ -28,6 +28,7 @@ import { join } from "node:path";
 import type { SurfacePayload } from "@shared/types";
 import type { Bounds, DisplayInfo, Layout } from "./displays";
 import { IconHost } from "./iconHost";
+import type { SettingsStore } from "./settingsStore";
 import {
   HWND_BOTTOM,
   IsWindow,
@@ -78,6 +79,23 @@ export class BottomSurface {
   private readonly seed = (Date.now() ^ (Math.random() * 0xffffffff)) >>> 0;
   private readonly epochMs = Date.now();
 
+  constructor(private readonly settings: SettingsStore) {}
+
+  /**
+   * Push current settings to every pane.
+   *
+   * Panes are not rebuilt for this: recreating them would restart each renderer and make the blobs
+   * flicker on every slider movement. Only a pause needs to touch the windows themselves.
+   */
+  applySettings(): void {
+    const value = this.settings.value;
+    for (const pane of this.panes) {
+      if (pane.window.isDestroyed()) continue;
+      pane.window.webContents.send("wallpaper:settings", value);
+    }
+    this.setPaused(value.paused);
+  }
+
   get paneCount(): number {
     return this.panes.length;
   }
@@ -110,6 +128,7 @@ export class BottomSurface {
     }
 
     this.startSink();
+    this.setPaused(this.settings.value.paused);
   }
 
   private async createPane(display: DisplayInfo, layout: Layout): Promise<void> {
@@ -208,6 +227,7 @@ export class BottomSurface {
       seed: this.seed,
       epochMs: this.epochMs,
       hud: SHOW_HUD,
+      settings: this.settings.value,
     };
     window.webContents.send("wallpaper:layout", payload);
   }

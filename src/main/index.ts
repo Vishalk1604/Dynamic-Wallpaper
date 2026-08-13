@@ -1,8 +1,9 @@
 import { app, globalShortcut } from "electron";
-import { writeFileSync } from "node:fs";
-import { join } from "node:path";
 import { BottomSurface } from "./bottomSurface";
 import { describeLayout, getLayout, onLayoutChange } from "./displays";
+import { SettingsStore } from "./settingsStore";
+import { SettingsWindow } from "./settingsWindow";
+import { WallpaperTray } from "./tray";
 
 // A wallpaper has to keep animating while it is permanently unfocused, which is precisely what
 // Chromium's background throttling exists to prevent.
@@ -18,95 +19,83 @@ app.setName("dynamic-wallpaper");
 
 const QUIT_ACCELERATOR = "Control+Alt+Shift+W";
 
-const surface = new BottomSurface();
-const log: string[] = [];
+let surface: BottomSurface | null = null;
+let tray: WallpaperTray | null = null;
+let settingsWindow: SettingsWindow | null = null;
+let store: SettingsStore | null = null;
 
-function record(line: string): void {
-  log.push(line);
-  console.log(line);
-}
+/**
+ * Only one instance may run: a second would stack another set of panes on the desktop and double the
+ * GPU cost for no visible benefit. A relaunch instead surfaces the existing instance's settings.
+ */
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+} else {
+  app.on("second-instance", () => settingsWindow?.open());
 
-function writeReport(): void {
-  try {
-    writeFileSync(join(app.getPath("userData"), "spike-report.txt"), log.join("\n"), "utf8");
-  } catch (error) {
-    console.error("could not write report", error);
-  }
-}
+  app.whenReady().then(() => {
+    store = new SettingsStore();
+    store.syncAutoStart();
 
-async function start(): Promise<void> {
-  const layout = getLayout();
-  record("=== display layout ===");
-  record(describeLayout(layout));
-  for (const d of layout.displays) {
-    record(
-      `  id=${d.id} "${d.label}" physical=${d.bounds.width}x${d.bounds.height}@${d.bounds.x},${d.bounds.y} ` +
-        `rot=${d.rotation} scale=${d.scaleFactor} internal=${d.internal} primary=${d.primary}`,
-    );
-  }
+    surface = new BottomSurface(store);
+    settingsWindow = new SettingsWindow(store, () => app.quit());
+    tray = new WallpaperTray(store, {
+      openSettings: () => settingsWindow?.open(),
+      quit: () => app.quit(),
+    });
 
-  await surface.apply(layout);
+    const layout = getLayout();
+    console.log(describeLayout(layout));
+    void surface.apply(layout);
 
-  record("\n=== surface ===");
-  record(`panes: ${surface.paneCount}`);
-  record(`icons adopted (wallpaper renders behind them): ${surface.iconsAdopted}`);
-  record(`quit with ${QUIT_ACCELERATOR}`);
+    tray.start();
+    store.onChange(() => {
+      store?.syncAutoStart();
+      surface?.applySettings();
+    });
 
-  setTimeout(async () => {
-    try {
-      const shots = await surface.capture(app.getPath("userData"));
-      record("\n=== renderer captures ===");
-      for (const s of shots) record(s);
-    } catch (error) {
-      record(`capture failed: ${String(error)}`);
+    onLayoutChange((next) => {
+      console.log(`display layout changed: ${describeLayout(next)}`);
+      void surface?.apply(next);
+    });
+
+    // A deliberate escape hatch: the panes are click-through and absent from Alt+Tab, so if the tray
+    // icon is ever hidden in the overflow this is the way out.
+    globalShortcut.register(QUIT_ACCELERATOR, () => app.quit());
+
+    // Opened on first run so the app is discoverable rather than being an invisible process.
+    if (!app.getLoginItemSettings().wasOpenedAtLogin && !process.argv.includes("--autostart")) {
+      settingsWindow.open();
     }
-    writeReport();
-  }, 2500);
-
-  writeReport();
-
-  onLayoutChange(async (next) => {
-    record("\n=== display layout changed ===");
-    record(describeLayout(next));
-    await surface.apply(next);
-    record(`panes: ${surface.paneCount}`);
-    writeReport();
   });
 }
-
-app.whenReady().then(async () => {
-  await start();
-  globalShortcut.register(QUIT_ACCELERATOR, () => {
-    record("\nquit requested via shortcut");
-    app.quit();
-  });
-});
 
 app.on("before-quit", () => {
-  surface.dispose();
+  surface?.dispose();
+  tray?.dispose();
+  settingsWindow?.dispose();
   globalShortcut.unregisterAll();
 });
 
 /**
- * The icon host is a child of one of our panes while adopted, and Windows destroys child windows
- * with their parent — so losing it would take the desktop icons with it until Explorer restarted.
- * Every plausible exit path therefore hands it back. All of these are synchronous FFI calls, which
- * is what makes them usable from `exit` and from a crash handler.
+ * The panes may own Explorer's icon host when the opt-in adoption mode is enabled, and Windows
+ * destroys child windows with their parent — so every exit path hands it back before the panes go.
  */
-process.on("exit", () => surface.releaseIcons());
+process.on("exit", () => surface?.releaseIcons());
 process.on("SIGINT", () => {
-  surface.releaseIcons();
+  surface?.releaseIcons();
   app.quit();
 });
 process.on("SIGTERM", () => {
-  surface.releaseIcons();
+  surface?.releaseIcons();
   app.quit();
 });
 process.on("uncaughtException", (error) => {
   console.error("uncaught exception, releasing icon host first", error);
-  surface.releaseIcons();
+  surface?.releaseIcons();
   app.quit();
 });
 
-// Registering a listener at all overrides Electron's default "quit when no windows remain".
+// Registering a listener at all overrides Electron's default "quit when no windows remain", which
+// matters because the wallpaper has no ordinary window to keep it alive.
 app.on("window-all-closed", () => {});

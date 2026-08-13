@@ -123,6 +123,11 @@ export class BlobPoints {
     this.material.uniforms["pixelScale"].value = scale;
   }
 
+  setBrightness(brightness: number): void {
+    // The base 1.35 keeps colours vivid where particles overlap; the setting scales around it.
+    this.material.uniforms["brightness"].value = 1.35 * brightness;
+  }
+
   dispose(): void {
     this.geometry.dispose();
     this.material.dispose();

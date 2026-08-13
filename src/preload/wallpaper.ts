@@ -1,13 +1,10 @@
 import { contextBridge, ipcRenderer } from "electron";
 
-export type WallpaperBridge = {
-  onLayout: (callback: (layout: unknown) => void) => void;
-};
-
-const bridge: WallpaperBridge = {
-  onLayout: (callback) => {
-    ipcRenderer.on("wallpaper:layout", (_event, layout) => callback(layout));
+contextBridge.exposeInMainWorld("wallpaper", {
+  onLayout: (callback: (payload: unknown) => void) => {
+    ipcRenderer.on("wallpaper:layout", (_event, payload) => callback(payload));
   },
-};
-
-contextBridge.exposeInMainWorld("wallpaper", bridge);
+  onSettings: (callback: (settings: unknown) => void) => {
+    ipcRenderer.on("wallpaper:settings", (_event, settings) => callback(settings));
+  },
+});

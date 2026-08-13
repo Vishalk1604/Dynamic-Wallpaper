@@ -13,6 +13,8 @@ export type DisplayInfo = {
   primary: boolean;
 };
 
+import type { Settings } from "./settings";
+
 export type Layout = {
   displays: DisplayInfo[];
   /** Bounding box of all displays, in physical pixels. */
@@ -34,4 +36,5 @@ export type SurfacePayload = {
   epochMs: number;
   /** Show the diagnostics overlay. Off for the shipped wallpaper. */
   hud: boolean;
+  settings: Settings;
 };

@@ -106,7 +106,7 @@ export class BlobWorld {
   /** Base alpha before any along-stream fade is applied. */
   private readonly baseAlpha: Float32Array;
 
-  private readonly config: SimConfig;
+  private config: SimConfig;
   private readonly random: Random;
   private wells: Well[];
   private tick = 0;
@@ -244,6 +244,35 @@ export class BlobWorld {
     this.velocities[i3] = vel[0] * speed;
     this.velocities[i3 + 1] = vel[1] * speed;
     this.velocities[i3 + 2] = vel[2] * speed;
+  }
+
+  /**
+   * Apply changed settings without rebuilding.
+   *
+   * Only geometry and speeds are adjusted, so particles keep their identity and the change reads as
+   * the blobs growing or slowing rather than as a reset. Anything that alters particle counts needs a
+   * new world instead, since the counts size the typed arrays.
+   */
+  retune(config: SimConfig, wells: Well[]): void {
+    const scale = config.blobRadius / this.config.blobRadius;
+    this.config = { ...this.config, ...config };
+    this.wells = wells;
+
+    if (scale !== 1) {
+      // Rescale the shells and move every particle with them, so nothing is left stranded outside
+      // its new bounds and forced to teleport on the next step.
+      for (let i = 0; i < this.count; i++) {
+        if (this.kind[i] === KIND_BRIDGE) continue;
+        const well = this.wells[this.anchor[i]];
+        this.extent[i] *= scale;
+        this.innerExtent[i] *= scale;
+        if (!well) continue;
+        const i3 = i * 3;
+        this.positions[i3] = well.x + (this.positions[i3] - well.x) * scale;
+        this.positions[i3 + 1] = well.y + (this.positions[i3 + 1] - well.y) * scale;
+        this.positions[i3 + 2] *= scale;
+      }
+    }
   }
 
   /** Rebuild positions for a new display arrangement; particle roles and colours are unchanged. */

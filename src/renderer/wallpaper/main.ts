@@ -8,31 +8,59 @@
  * boundary. Determinism is what keeps them agreeing: a shared seed, a fixed timestep, and a tick
  * count derived from a shared epoch instead of from frame deltas.
  */
-import { colourForIndex } from "@shared/palette";
+import type { Settings } from "@shared/settings";
+import { colourForIndex, themeById, type Theme } from "@shared/themes";
 import type { DisplayInfo, SurfacePayload } from "@shared/types";
 import { BlobPoints } from "./gfx/blobPoints";
 import { Stage } from "./gfx/stage";
-import { BlobWorld, DEFAULT_SIM_CONFIG, type Well } from "./sim/world";
+import { BlobWorld, DEFAULT_SIM_CONFIG, type SimConfig, type Well } from "./sim/world";
 
 type WallpaperBridge = {
   onLayout: (callback: (payload: SurfacePayload) => void) => void;
+  onSettings: (callback: (settings: Settings) => void) => void;
 };
+
+/**
+ * Fold user settings into the tuned simulation defaults.
+ *
+ * Settings are multipliers rather than raw constants, so the defaults stay the single source of
+ * truth for the look and these only scale it. Particle counts are rounded because they size typed
+ * arrays.
+ */
+function configFor(settings: Settings): SimConfig {
+  const base = DEFAULT_SIM_CONFIG;
+  return {
+    ...base,
+    blobParticles: Math.max(200, Math.round(base.blobParticles * settings.density)),
+    coreParticles: Math.max(50, Math.round(base.coreParticles * settings.density)),
+    bridgeParticles: Math.max(50, Math.round(base.bridgeParticles * settings.density)),
+    blobRadius: base.blobRadius * settings.size,
+    driftSpeed: base.driftSpeed * settings.motion,
+    // Speed is the inverse of travel time, so a higher multiplier has to shorten it.
+    bridgeTravelSeconds: base.bridgeTravelSeconds / Math.max(0.05, settings.streamSpeed),
+  };
+}
+
+/** Whether a change needs the whole world rebuilt, or can be applied to the running one. */
+function needsRebuild(a: Settings, b: Settings): boolean {
+  return a.density !== b.density || a.themeId !== b.themeId;
+}
 
 const bridge = (globalThis as unknown as { wallpaper: WallpaperBridge }).wallpaper;
 const canvas = document.getElementById("gl") as HTMLCanvasElement;
 const hud = document.getElementById("hud")!;
 
 /** Screen coordinates are Y-down, world coordinates are Y-up. */
-function wellFor(display: DisplayInfo, index: number): Well {
+function wellFor(display: DisplayInfo, index: number, theme: Theme): Well {
   const b = display.bounds;
   return {
     displayId: display.id,
     x: b.x + b.width / 2,
     y: -(b.y + b.height / 2),
-    // Larger screens carry more mass, so a big monitor pulls harder on a small one. Normalised
-    // against 1080p so the tuned gravity constant stays meaningful.
+    // Screen area relative to 1080p. Unused by the kinematic model, kept so blob scale could follow
+    // monitor size later.
     mass: (b.width * b.height) / (1920 * 1080),
-    colour: colourForIndex(index),
+    colour: colourForIndex(theme, index),
   };
 }
 
@@ -42,6 +70,7 @@ class Pane {
   private points: BlobPoints | null = null;
   private stage: Stage | null = null;
   private payload: SurfacePayload | null = null;
+  private settings: Settings | null = null;
 
   private frames = 0;
   private lastHudAt = 0;
@@ -50,13 +79,16 @@ class Pane {
   apply(payload: SurfacePayload): void {
     const first = this.payload === null;
     this.payload = payload;
+    this.settings = payload.settings;
 
     if (payload.hud) hud.dataset["enabled"] = "1";
     else delete hud.dataset["enabled"];
 
     // Blobs sit dead centre on their screen, as in the reference. The interaction is carried by the
     // stream between them rather than by displacing the clouds.
-    const wells = payload.layout.displays.map(wellFor);
+    const theme = themeById(payload.settings.themeId);
+    const wells = payload.layout.displays.map((d, i) => wellFor(d, i, theme));
+    const config = configFor(payload.settings);
 
     if (!this.stage) {
       this.stage = new Stage(canvas, payload.region);
@@ -65,7 +97,7 @@ class Pane {
     }
 
     if (!this.world) {
-      this.world = new BlobWorld(wells, DEFAULT_SIM_CONFIG, payload.seed);
+      this.world = new BlobWorld(wells, config, payload.seed);
     } else if (this.world.wellCount !== wells.length) {
       // Particle count is tied to the number of wells, so a display being added or removed needs a
       // fresh world; anything else can be reconfigured in place.
@@ -78,7 +110,7 @@ class Pane {
         this.points.dispose();
         this.points = null;
       }
-      this.world = new BlobWorld(wells, DEFAULT_SIM_CONFIG, payload.seed);
+      this.world = new BlobWorld(wells, config, payload.seed);
     } else {
       this.world.reconfigure(wells);
     }
@@ -87,8 +119,35 @@ class Pane {
       this.points = new BlobPoints(this.world, window.devicePixelRatio || 1);
       this.stage.scene.add(this.points.points);
     }
+    this.points.setPixelScale((window.devicePixelRatio || 1) * payload.settings.particleScale);
+    this.points.setBrightness(payload.settings.brightness);
 
     if (first) requestAnimationFrame(this.frame);
+  }
+
+  /**
+   * Apply a settings change to the running pane.
+   *
+   * Only density and theme change the particle arrays, so only those rebuild the world; everything
+   * else is a uniform or a simulation constant and can be swapped without a visible reset.
+   */
+  applySettings(next: Settings): void {
+    const previous = this.settings;
+    if (!this.payload) return;
+    this.settings = next;
+
+    if (!previous || needsRebuild(previous, next)) {
+      this.apply({ ...this.payload, settings: next });
+      return;
+    }
+
+    const theme = themeById(next.themeId);
+    this.world?.retune(
+      configFor(next),
+      this.payload.layout.displays.map((d, i) => wellFor(d, i, theme)),
+    );
+    this.points?.setPixelScale((window.devicePixelRatio || 1) * next.particleScale);
+    this.points?.setBrightness(next.brightness);
   }
 
   private readonly frame = (now: number): void => {
@@ -126,3 +185,4 @@ class Pane {
 
 const pane = new Pane();
 bridge.onLayout((payload) => pane.apply(payload));
+bridge.onSettings((settings) => pane.applySettings(settings));

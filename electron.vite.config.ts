@@ -17,7 +17,10 @@ export default defineConfig({
     plugins: [externalizeDepsPlugin()],
     build: {
       rollupOptions: {
-        input: { wallpaper: resolve(__dirname, "src/preload/wallpaper.ts") },
+        input: {
+          wallpaper: resolve(__dirname, "src/preload/wallpaper.ts"),
+          settings: resolve(__dirname, "src/preload/settings.ts"),
+        },
       },
     },
   },
@@ -27,6 +30,7 @@ export default defineConfig({
       rollupOptions: {
         input: {
           wallpaper: resolve(__dirname, "src/renderer/wallpaper/index.html"),
+          settings: resolve(__dirname, "src/renderer/settings/index.html"),
         },
       },
     },
