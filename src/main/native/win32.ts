@@ -103,6 +103,8 @@ export const WM_SPAWN_WORKER = 0x052c;
 
 export const SMTO_NORMAL = 0x0000;
 
+export const SWP_NOSIZE = 0x0001;
+export const SWP_NOMOVE = 0x0002;
 export const SWP_NOZORDER = 0x0004;
 export const SWP_NOACTIVATE = 0x0010;
 export const SWP_FRAMECHANGED = 0x0020;
@@ -110,9 +112,26 @@ export const SWP_SHOWWINDOW = 0x0040;
 export const SWP_NOCOPYBITS = 0x0100;
 
 export const GWL_STYLE = -16;
+export const GWL_EXSTYLE = -20;
 
 export const WS_CHILD = 0x40000000;
 export const WS_POPUP = 0x80000000;
+
+export const WS_EX_TOOLWINDOW = 0x00000080;
+export const WS_EX_NOACTIVATE = 0x08000000;
+
+/**
+ * Keep a window out of Alt+Tab and the taskbar, and stop it ever taking activation.
+ *
+ * Electron's `skipTaskbar` alone does not set WS_EX_TOOLWINDOW on this build, which leaves the
+ * window listed in Alt+Tab. Must be called before the window is first shown, since Windows caches
+ * Alt+Tab eligibility when a window becomes visible.
+ */
+export function makeToolWindow(hwnd: number): void {
+  const previous = Number(GetWindowLongPtrW(hwnd, GWL_EXSTYLE)) >>> 0;
+  const next = (previous | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE) >>> 0;
+  SetWindowLongPtrW(hwnd, GWL_EXSTYLE, next);
+}
 
 /**
  * Convert a WS_POPUP window into a genuine WS_CHILD.

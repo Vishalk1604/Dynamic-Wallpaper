@@ -71,21 +71,80 @@ Conclusion: on this build, an Electron/Chromium window stops being composited wh
 top-level. Chromium's presentation path binds to a top-level `HWND`, and reparenting orphans it.
 This is a property of Chromium's compositor, not of the attachment logic.
 
-## Viable approaches
+## GDI painting into the desktop is also inert
 
-**Bottom-most top-level window.** Keep the window top-level so Chromium keeps compositing — the
-control case, already proven to work — and make it behave like a wallpaper: `WS_EX_NOACTIVATE` and
-`WS_EX_TOOLWINDOW` so it never takes focus and stays out of Alt+Tab and the taskbar, click-through
-so the desktop stays usable, and pinned to the bottom of the z-order with re-assertion when other
-windows activate. Every ordinary window then renders above it. Deviations from a true wallpaper:
-"Show desktop" (Win+D) reveals the real desktop over it, and it would cover desktop icons if they
-were ever re-enabled.
+The obvious next approach is to skip reparenting: render offscreen and blit each frame into the
+wallpaper host's device context. That was built and measured, and the throughput is excellent —
+**360 frames, 0 failures, 59.7 fps sustained, 1.81 ms per blit** for a full 3000×1920 `StretchDIBits`
+with WebGL driving the offscreen surface. Offscreen rendering does keep GPU-accelerated WebGL, so
+this part of the idea is sound.
 
-**Offscreen render, then blit.** Run the renderer with `offscreen: true`, take each frame from the
-`paint` event, and draw it into the `WorkerW` device context with GDI from the main process. This
-yields a genuine wallpaper behind icons, at the cost of a per-frame full-resolution copy for every
-monitor and materially more CPU.
+Nothing appeared on screen.
 
-**Native render surface.** A plain Win32 window drawing with OpenGL or Direct3D has no such
-top-level dependency and composites correctly as a child. This means not using Electron for the
-wallpaper surface, which needs a C++ or Rust toolchain that is not installed on this machine.
+To remove Electron from the question entirely, plain GDI `FillRect` was tried against four
+combinations — WorkerW and Progman, each with `GetDC` and with
+`GetDCEx(DCX_WINDOW | DCX_CACHE | DCX_LOCKWINDOWUPDATE)`. All four returned success. All four painted
+nothing, with the desktop fully exposed via `Shell.MinimizeAll`.
+
+So on this build the desktop background is composited by DWM and the legacy GDI paint targets are
+inert. Both classic wallpaper techniques — reparent a window, or draw into the desktop DC — are dead
+here, for the same underlying reason.
+
+One aside worth knowing when verifying any of this: `GetDC` clips to a window's **visible region**,
+so while ordinary app windows cover the desktop, everything drawn into the wallpaper host is clipped
+away and a DC readback returns black. Verification has to expose the desktop first.
+
+## What this build actually allows
+
+An ordinary top-level window renders perfectly — that was the control case throughout. So the
+surface stays top-level and is made to behave like wallpaper instead, which is what
+`src/main/bottomSurface.ts` does. Verified end state:
+
+```
+bottom-most first:
+  Program Manager      [Progman]              <- the desktop
+  Dynamic Wallpaper    [Chrome_WidgetWin_1]   noactivate=True toolwindow=True
+  Dynamic Wallpaper    [Chrome_WidgetWin_1]   noactivate=True toolwindow=True
+  Claude               [Chrome_WidgetWin_1]
+  ...every other application above
+```
+
+Panes land on their exact monitor rects, including the portrait screen at negative coordinates:
+`1080x1920@-1080,-534` and `1920x1080@0,0`.
+
+**The honest limitation:** this sits above the real wallpaper, not behind desktop icons. With icons
+hidden — as they are on this machine — it is indistinguishable from a true wallpaper. With icons
+enabled it would cover them, and "Show desktop" (Win+D) reveals the real desktop over it.
+
+### Three Windows behaviours that cost real time here
+
+**Chromium clamps window size to a work area.** A single window spanning the virtual desktop was the
+original design, because one canvas means one simulation and no cross-window coordination. Asking for
+3000×1920 produced a 1920×1080 window, at creation and via `SetWindowPos` alike. Per-monitor panes
+stay within the limit.
+
+**`resizable: false` pins the clamped size.** It fixes min and max size to whatever the window was
+created at, so `SetWindowPos` silently cannot grow it — the portrait pane came out `1080x1080`
+instead of `1080x1920`. Panes are therefore created resizable, with `setMinimumSize(1,1)` and
+`setMaximumSize(0,0)` to clear inferred constraints, and geometry is asserted and then *verified*
+rather than assumed. Nothing can drag them: they are click-through and non-activatable.
+
+**`skipTaskbar: true` does not set `WS_EX_TOOLWINDOW`.** It keeps the pane off the taskbar but leaves
+it in Alt+Tab. The ex-style has to be set explicitly, before the window is first shown, because
+Windows caches Alt+Tab eligibility at that point.
+
+## Approaches that would give true behind-icons rendering
+
+Neither is implemented; recorded so the tradeoff is explicit if the limitation above matters later.
+
+**Native render surface as a child of the wallpaper host.** A plain Win32 window drawing with
+Direct3D or OpenGL has no dependency on being top-level and composites correctly as a child, so it
+can be parented under the icon host. This is how a purpose-built wallpaper engine would do it. It
+means the render surface is no longer Chromium, so the visuals could not be Three.js, and it needs a
+C++ or Rust toolchain — neither of which is installed here.
+
+**Swap the actual wallpaper image.** Write each frame to disk and call
+`SystemParametersInfo(SPI_SETDESKWALLPAPER)`, or the `IDesktopWallpaper` COM interface. This is
+genuinely the wallpaper, behind icons, by definition. It also writes to the registry and forces a
+shell repaint per frame, so it is only usable at a few frames per second — fine for a slow gradient,
+useless for a particle simulation.

@@ -56,12 +56,25 @@ npm run dev
 
 ## Roadmap
 
-- [ ] Attach render surface to the Windows wallpaper layer, behind desktop icons
+- [x] Render surface covering every monitor, pinned beneath all application windows
 - [ ] Live display topology tracking (rotation, offset, add/remove, primary change, DPI)
 - [ ] Particle simulation and bloom rendering
 - [ ] Cross-bezel continuity validation
 - [ ] Tray icon and settings app with themes
 - [ ] Installer
+
+### A note on the wallpaper layer
+
+Windows 11 build 26200 offers no working way to render into the real wallpaper layer from a Chromium
+process. Reparenting into the shell's `WorkerW` stops Chromium compositing entirely, and painting into
+the desktop device context with GDI is silently discarded — even plain `FillRect` reports success and
+draws nothing. The measurements and everything ruled out are in
+[docs/desktop-layer-findings.md](docs/desktop-layer-findings.md).
+
+The surface is therefore a top-level window per monitor, pinned to the bottom of the z-order,
+non-activatable, click-through, and absent from the taskbar and Alt+Tab. Every application window
+draws above it. With desktop icons hidden it is indistinguishable from a real wallpaper; with icons
+enabled it would cover them, and "Show desktop" reveals the desktop over it.
 
 ## Settings
 
