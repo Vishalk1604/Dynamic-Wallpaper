@@ -12,6 +12,7 @@ import type { Settings } from "@shared/settings";
 import { hexToRgb, themeById, type Rgb } from "@shared/themes";
 import type { DisplayInfo, SurfacePayload } from "@shared/types";
 import { BlobPoints } from "./gfx/blobPoints";
+import { LumenField, type LumenBody } from "./gfx/lumenField";
 import { MistField, type MistWell } from "./gfx/mistField";
 import { Stage } from "./gfx/stage";
 import { BlobWorld, DEFAULT_SIM_CONFIG, type SimConfig, type Well } from "./sim/world";
@@ -32,6 +33,9 @@ const hud = document.getElementById("hud")!;
  * this is noticeably smaller than it looks like it should be.
  */
 const MIST_RADIUS = 195;
+
+/** Base body radius for Lumen. The thresholded surface sits inside this, so it renders smaller. */
+const LUMEN_RADIUS = 400;
 
 function colourFor(settings: Settings, index: number): Rgb {
   return hexToRgb(settings.colours[index % settings.colours.length] ?? "#ffffff");
@@ -78,6 +82,7 @@ class Pane {
   private world: BlobWorld | null = null;
   private points: BlobPoints | null = null;
   private mist: MistField | null = null;
+  private lumen: LumenField | null = null;
   private stage: Stage | null = null;
   private payload: SurfacePayload | null = null;
   private settings: Settings | null = null;
@@ -106,6 +111,7 @@ class Pane {
 
     this.teardownVisuals();
     if (theme.id === "aether") this.buildMist(payload);
+    else if (theme.id === "lumen") this.buildLumen(payload);
     else this.buildFilament(payload);
 
     if (first) requestAnimationFrame(this.frame);
@@ -124,6 +130,33 @@ class Pane {
       this.mist.dispose();
       this.mist = null;
     }
+    if (this.lumen) {
+      this.stage.scene.remove(this.lumen.mesh);
+      this.lumen.dispose();
+      this.lumen = null;
+    }
+  }
+
+  private bodies(settings: Settings): LumenBody[] {
+    return (this.payload?.layout.displays ?? []).map((d, i) => {
+      const b = d.bounds;
+      return {
+        x: b.x + b.width / 2,
+        y: -(b.y + b.height / 2),
+        colour: colourFor(settings, i),
+      };
+    });
+  }
+
+  private buildLumen(payload: SurfacePayload): void {
+    this.lumen = new LumenField(
+      payload.region,
+      this.bodies(payload.settings),
+      LUMEN_RADIUS * payload.settings.size,
+    );
+    this.lumen.setBrightness(payload.settings.brightness);
+    this.lumen.setTravelSpeed(payload.settings.streamSpeed);
+    this.stage!.scene.add(this.lumen.mesh);
   }
 
   private buildFilament(payload: SurfacePayload): void {
@@ -177,6 +210,13 @@ class Pane {
       return;
     }
 
+    if (this.lumen) {
+      this.lumen.setBodies(this.bodies(next), LUMEN_RADIUS * next.size);
+      this.lumen.setBrightness(next.brightness);
+      this.lumen.setTravelSpeed(next.streamSpeed);
+      return;
+    }
+
     const wells = this.payload.layout.displays.map((d, i) => wellFor(d, i, next));
     this.world?.retune(configFor(next), wells);
     // Colours live in the particle buffers, so they have to be re-applied explicitly — without this
@@ -197,6 +237,8 @@ class Pane {
 
     if (this.mist) {
       this.mist.setTime(elapsed * settings.motion);
+    } else if (this.lumen) {
+      this.lumen.update(elapsed * settings.motion);
     } else if (this.world && this.points) {
       this.world.advanceTo(Math.floor(elapsed / DEFAULT_SIM_CONFIG.timeStep));
       this.points.sync();
@@ -217,7 +259,11 @@ class Pane {
     if (!this.payload || !hud.dataset["enabled"]) return;
     const r = this.payload.region;
     const theme = themeById(this.payload.settings.themeId);
-    const detail = this.world ? `${this.world.count} particles` : "volumetric mist";
+    const detail = this.world
+      ? `${this.world.count} particles`
+      : this.lumen
+        ? "metaball field"
+        : "volumetric mist";
     hud.textContent =
       `${theme.name}  |  ${r.width}x${r.height} @${r.x},${r.y}  |  ` +
       `${detail}  |  ${this.fps.toFixed(0)} fps  |  ${this.stage?.info ?? ""}`;

@@ -6,7 +6,7 @@
  */
 export type Rgb = readonly [number, number, number];
 
-export type ThemeId = "filament" | "aether";
+export type ThemeId = "filament" | "aether" | "lumen";
 
 export type Theme = {
   id: ThemeId;
@@ -27,6 +27,12 @@ export const THEMES: readonly Theme[] = [
     id: "aether",
     name: "Aether",
     description: "Volumetric liquid mist, thick and thin, flowing between screens",
+    ignores: ["particleScale"],
+  },
+  {
+    id: "lumen",
+    name: "Lumen",
+    description: "One smooth organic body with a hard edge, reaching between screens",
     ignores: ["particleScale"],
   },
 ];
