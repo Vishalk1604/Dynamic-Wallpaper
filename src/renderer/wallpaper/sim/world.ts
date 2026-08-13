@@ -190,6 +190,9 @@ export class BlobWorld {
         for (let n = 0; n < coreParticles; n++, index++) {
           this.kind[index] = KIND_CORE;
           this.anchor[index] = to;
+          // The cluster sits inside `to` but wears the colour of `from`, so it reads as material
+          // that arrived from the other screen. Recorded so colours can be re-applied later.
+          this.target[index] = from;
           this.extent[index] = radius;
           this.innerExtent[index] = radius * coreShellInner;
           this.sizes[index] = this.random.range(2.2, 7);
@@ -275,7 +278,7 @@ export class BlobWorld {
     }
   }
 
-  /** Rebuild positions for a new display arrangement; particle roles and colours are unchanged. */
+  /** Rebuild positions for a new display arrangement, and re-apply colours. */
   reconfigure(wells: Well[]): void {
     this.wells = wells;
     for (let i = 0; i < this.count; i++) {
@@ -284,6 +287,30 @@ export class BlobWorld {
       this.anchor[i] = anchor;
       const outer = this.extent[i];
       this.placeInSphere(i, anchor, outer, outer > 0 ? this.innerExtent[i] / outer : 0);
+    }
+    this.recolour();
+  }
+
+  /**
+   * Re-apply each particle's colour from its wells.
+   *
+   * Colours are assigned once at construction, so changing a colour without this leaves the buffers
+   * holding the old values and nothing visibly changes — which is exactly what happened when the
+   * theme switcher appeared to do nothing at all.
+   *
+   * A particle's colour depends on its role: blob particles take their own well's colour, while the
+   * central cluster and the stream take the colour of the screen they came *from*, which is what
+   * makes an arriving stream read as belonging to its source.
+   */
+  recolour(): void {
+    const wells = this.wells;
+    if (wells.length === 0) return;
+    for (let i = 0; i < this.count; i++) {
+      // Blob particles belong to their own well; the central cluster and the streams carry the
+      // colour of the screen they originated from, which is held in `target` and `anchor`.
+      const source = this.kind[i] === KIND_CORE ? this.target[i] : this.anchor[i];
+      const colour = wells[Math.min(source, wells.length - 1)]?.colour;
+      if (colour) this.setColour(i, colour);
     }
   }
 

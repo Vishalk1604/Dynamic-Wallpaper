@@ -2,9 +2,10 @@
  * The settings window: a frameless dark panel, created on demand and hidden rather than destroyed so
  * reopening it from the tray is instant.
  */
-import { BrowserWindow, ipcMain, screen } from "electron";
+import { BrowserWindow, app, ipcMain } from "electron";
 import { join } from "node:path";
 import type { Settings } from "@shared/settings";
+import { getLayout } from "./displays";
 import type { SettingsStore } from "./settingsStore";
 
 export class SettingsWindow {
@@ -21,8 +22,10 @@ export class SettingsWindow {
   private registerIpc(): void {
     ipcMain.handle("settings:read", () => ({
       settings: this.settings.value,
-      displays: screen.getAllDisplays().length,
-      packaged: require("electron").app.isPackaged as boolean,
+      // Same ordering as the wallpaper's wells, so "Blob 1" in the settings names the same monitor
+      // the first colour actually drives.
+      displays: getLayout().displays.map((d) => ({ id: d.id, label: d.label })),
+      packaged: app.isPackaged,
     }));
     ipcMain.on("settings:update", (_event, patch: Partial<Settings>) => this.settings.update(patch));
     ipcMain.on("settings:reset", () => this.settings.reset());

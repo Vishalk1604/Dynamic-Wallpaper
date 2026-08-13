@@ -39,6 +39,7 @@ export class Stage {
    * modest.
    */
   private bloomEnabled = false;
+  private resolutionScale = 1;
 
   constructor(canvas: HTMLCanvasElement, region: Bounds, bloom: BloomSettings = DEFAULT_BLOOM) {
     this.renderer = new WebGLRenderer({
@@ -75,7 +76,9 @@ export class Stage {
     const cssWidth = Math.max(1, Math.round(region.width / dpr));
     const cssHeight = Math.max(1, Math.round(region.height / dpr));
 
-    this.renderer.setPixelRatio(dpr);
+    // Below 1 renders fewer pixels and lets the canvas scale up. Used by the raymarched theme, where
+    // per-pixel cost is high and the result is soft enough to hide the loss.
+    this.renderer.setPixelRatio(dpr * this.resolutionScale);
     this.renderer.setSize(cssWidth, cssHeight, false);
     this.composer.setSize(cssWidth, cssHeight);
     this.bloom.resolution.set(cssWidth, cssHeight);
@@ -105,6 +108,11 @@ export class Stage {
 
   setBloomEnabled(enabled: boolean): void {
     this.bloomEnabled = enabled;
+  }
+
+  /** Takes effect on the next `resize`. */
+  setResolutionScale(scale: number): void {
+    this.resolutionScale = Math.max(0.25, Math.min(1, scale));
   }
 
   get info(): string {

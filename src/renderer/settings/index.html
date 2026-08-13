@@ -104,43 +104,59 @@
         margin-bottom: 12px;
       }
 
-      .themes {
-        display: grid;
-        grid-template-columns: repeat(3, 1fr);
-        gap: 8px;
-      }
-      .theme {
+      select {
         -webkit-app-region: no-drag;
-        border: 1px solid var(--panel-edge);
-        background: rgba(255, 255, 255, 0.02);
-        border-radius: 9px;
-        padding: 9px 10px;
-        cursor: pointer;
-        text-align: left;
-        color: var(--text);
-        font-family: inherit;
-        transition: border-color 0.12s, background 0.12s;
-      }
-      .theme:hover {
+        width: 100%;
         background: rgba(255, 255, 255, 0.05);
+        color: var(--text);
+        border: 1px solid var(--panel-edge);
+        border-radius: 8px;
+        padding: 8px 10px;
+        font-family: inherit;
+        font-size: 12.5px;
+        outline: none;
+        cursor: pointer;
       }
-      .theme[aria-pressed="true"] {
+      select:focus {
         border-color: var(--accent);
-        background: var(--accent-dim);
       }
-      .theme .name {
-        font-size: 12px;
-        font-weight: 500;
-        margin-bottom: 7px;
-      }
-      .swatches {
+
+      /* One colour picker per detected screen, named after the monitor it drives. */
+      .colour-row {
         display: flex;
-        gap: 4px;
+        align-items: center;
+        gap: 10px;
+        padding: 5px 0;
       }
-      .swatch {
-        width: 13px;
-        height: 13px;
-        border-radius: 50%;
+      .colour-row .label {
+        flex: 1;
+        color: var(--muted);
+        font-size: 12px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      input[type="color"] {
+        -webkit-app-region: no-drag;
+        width: 42px;
+        height: 24px;
+        padding: 0;
+        border: 1px solid var(--panel-edge);
+        border-radius: 6px;
+        background: transparent;
+        cursor: pointer;
+      }
+      input[type="color"]::-webkit-color-swatch-wrapper {
+        padding: 2px;
+      }
+      input[type="color"]::-webkit-color-swatch {
+        border: 0;
+        border-radius: 4px;
+      }
+      .divider {
+        height: 1px;
+        background: var(--panel-edge);
+        margin: 12px 0 8px;
       }
 
       .row {
@@ -233,11 +249,13 @@
     <main>
       <section>
         <h2>Theme</h2>
-        <div class="themes" id="themes"></div>
+        <select id="theme"></select>
+        <p class="hint" id="themeDescription">—</p>
       </section>
 
       <section>
         <h2>Appearance</h2>
+        <div id="colours"></div>
         <div id="sliders"></div>
       </section>
 

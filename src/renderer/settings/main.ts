@@ -1,14 +1,16 @@
 /**
  * Settings window.
  *
- * Changes are applied live rather than on an OK button: the wallpaper is the preview, so a slider
- * that only takes effect when confirmed would make tuning it guesswork.
+ * Changes apply live rather than behind an OK button: the wallpaper is the preview, so a control
+ * that only took effect when confirmed would make tuning it guesswork.
  */
 import { SETTING_RANGES, type NumericSetting, type Settings } from "@shared/settings";
-import { THEMES } from "@shared/themes";
+import { THEMES, themeById } from "@shared/themes";
+
+type DisplaySummary = { id: number; label: string };
 
 type SettingsBridge = {
-  read: () => Promise<{ settings: Settings; displays: number; packaged: boolean }>;
+  read: () => Promise<{ settings: Settings; displays: DisplaySummary[]; packaged: boolean }>;
   update: (patch: Partial<Settings>) => void;
   reset: () => void;
   quit: () => void;
@@ -18,47 +20,66 @@ type SettingsBridge = {
 
 const bridge = (globalThis as unknown as { settingsApi: SettingsBridge }).settingsApi;
 
-const themesEl = document.getElementById("themes")!;
+const themeEl = document.getElementById("theme") as HTMLSelectElement;
+const themeDescriptionEl = document.getElementById("themeDescription")!;
+const coloursEl = document.getElementById("colours")!;
 const slidersEl = document.getElementById("sliders")!;
 const pausedEl = document.getElementById("paused") as HTMLInputElement;
 const autoStartEl = document.getElementById("autoStart") as HTMLInputElement;
 const displaysEl = document.getElementById("displays")!;
 
-function rgbToCss(rgb: readonly [number, number, number]): string {
-  const to255 = (v: number): number => Math.round(Math.min(1, Math.max(0, v)) * 255);
-  return `rgb(${to255(rgb[0])}, ${to255(rgb[1])}, ${to255(rgb[2])})`;
-}
+let displays: DisplaySummary[] = [];
+let current: Settings | null = null;
 
 function buildThemes(): void {
   for (const theme of THEMES) {
-    const button = document.createElement("button");
-    button.className = "theme";
-    button.dataset["themeId"] = theme.id;
-    button.title = theme.description;
-    button.setAttribute("aria-pressed", "false");
+    const option = document.createElement("option");
+    option.value = theme.id;
+    option.textContent = theme.name;
+    themeEl.appendChild(option);
+  }
+  themeEl.addEventListener("change", () => bridge.update({ themeId: themeEl.value }));
+}
 
-    const name = document.createElement("div");
-    name.className = "name";
-    name.textContent = theme.name;
+const colourInputs: HTMLInputElement[] = [];
 
-    const swatches = document.createElement("div");
-    swatches.className = "swatches";
-    // Only the first few, since that is how many a realistic monitor count will actually use.
-    for (const colour of theme.colours.slice(0, 4)) {
-      const dot = document.createElement("span");
-      dot.className = "swatch";
-      dot.style.background = rgbToCss(colour);
-      swatches.appendChild(dot);
-    }
+/** One picker per screen. Rebuilt when the display list changes, so a new monitor gains a control. */
+function buildColours(): void {
+  coloursEl.replaceChildren();
+  colourInputs.length = 0;
 
-    button.append(name, swatches);
-    button.addEventListener("click", () => bridge.update({ themeId: theme.id }));
-    themesEl.appendChild(button);
+  displays.forEach((display, index) => {
+    const row = document.createElement("div");
+    row.className = "colour-row";
+
+    const label = document.createElement("span");
+    label.className = "label";
+    label.textContent = `Blob ${index + 1} — ${display.label}`;
+
+    const input = document.createElement("input");
+    input.type = "color";
+    input.addEventListener("input", () => {
+      if (!current) return;
+      const colours = [...current.colours];
+      colours[index] = input.value;
+      bridge.update({ colours });
+    });
+
+    row.append(label, input);
+    coloursEl.appendChild(row);
+    colourInputs.push(input);
+  });
+
+  if (displays.length > 0) {
+    const divider = document.createElement("div");
+    divider.className = "divider";
+    coloursEl.appendChild(divider);
   }
 }
 
 const outputs = new Map<NumericSetting, HTMLOutputElement>();
 const inputs = new Map<NumericSetting, HTMLInputElement>();
+const rows = new Map<NumericSetting, HTMLElement>();
 
 function buildSliders(): void {
   for (const key of Object.keys(SETTING_RANGES) as NumericSetting[]) {
@@ -90,19 +111,31 @@ function buildSliders(): void {
     slidersEl.appendChild(row);
     inputs.set(key, input);
     outputs.set(key, output);
+    rows.set(key, row);
   }
 }
 
 function render(settings: Settings): void {
-  for (const button of Array.from(themesEl.children) as HTMLElement[]) {
-    button.setAttribute("aria-pressed", String(button.dataset["themeId"] === settings.themeId));
-  }
+  current = settings;
+
+  const theme = themeById(settings.themeId);
+  themeEl.value = theme.id;
+  themeDescriptionEl.textContent = theme.description;
+
+  colourInputs.forEach((input, index) => {
+    if (document.activeElement === input) return;
+    input.value = settings.colours[index] ?? "#ffffff";
+  });
+
   for (const [key, input] of inputs) {
-    // Skip the control being dragged, so re-rendering cannot fight the user's own input.
+    // A control that has no meaning for the active theme is hidden rather than left to mislead.
+    rows.get(key)!.style.display = theme.ignores.includes(key) ? "none" : "";
+    // Skip whatever is being dragged, so re-rendering cannot fight the user's own input.
     if (document.activeElement === input) continue;
     input.value = String(settings[key]);
     outputs.get(key)!.textContent = `${settings[key].toFixed(2)}×`;
   }
+
   pausedEl.checked = settings.paused;
   autoStartEl.checked = settings.autoStart;
 }
@@ -117,10 +150,13 @@ buildThemes();
 buildSliders();
 bridge.onChanged(render);
 
-void bridge.read().then(({ settings, displays, packaged }) => {
-  render(settings);
-  autoStartEl.disabled = !packaged;
-  displaysEl.textContent = packaged
-    ? `${displays} display${displays === 1 ? "" : "s"} detected. One blob per screen, connected by a stream.`
-    : `${displays} display${displays === 1 ? "" : "s"} detected. "Start with Windows" needs a packaged build.`;
+void bridge.read().then((state) => {
+  displays = state.displays;
+  buildColours();
+  render(state.settings);
+  autoStartEl.disabled = !state.packaged;
+  const count = displays.length;
+  displaysEl.textContent = state.packaged
+    ? `${count} display${count === 1 ? "" : "s"} detected.`
+    : `${count} display${count === 1 ? "" : "s"} detected. "Start with Windows" needs a packaged build.`;
 });

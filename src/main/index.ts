@@ -67,6 +67,17 @@ if (!app.requestSingleInstanceLock()) {
     if (!app.getLoginItemSettings().wasOpenedAtLogin && !process.argv.includes("--autostart")) {
       settingsWindow.open();
     }
+
+    // Render each pane offscreen to a PNG. Chromium renders these regardless of what covers the
+    // desktop, so the wallpaper can be inspected without minimising the user's windows.
+    if (process.env["DW_CAPTURE"] === "1") {
+      setTimeout(() => {
+        void surface
+          ?.capture(app.getPath("userData"))
+          .then((files) => files.forEach((f) => console.log(`captured ${f}`)))
+          .catch((error) => console.error("capture failed", error));
+      }, 4000);
+    }
   });
 }
 

@@ -29,7 +29,11 @@ export class SettingsStore {
 
   private read(): Settings {
     try {
-      return normaliseSettings(JSON.parse(readFileSync(this.path, "utf8")));
+      // Strip a byte-order mark before parsing. JSON.parse throws on a leading BOM, and plenty of
+      // Windows editors and PowerShell's own Out-File add one, which would silently discard the
+      // user's entire configuration and reset to defaults.
+      const text = readFileSync(this.path, "utf8").replace(/^﻿/, "");
+      return normaliseSettings(JSON.parse(text));
     } catch {
       return DEFAULT_SETTINGS;
     }

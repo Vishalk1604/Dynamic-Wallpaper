@@ -1,17 +1,18 @@
 /**
- * One pane of the wallpaper: a full simulation of every blob, rendered through a camera that only
- * looks at this monitor's slice of the world.
+ * One pane of the wallpaper: the whole scene simulated, rendered through a camera that only looks at
+ * this monitor's slice of the world.
  *
- * Every pane runs the identical simulation rather than only its own blob. That is deliberate — a
- * particle drifting from one screen toward another has to be drawn by whichever pane it enters, and
- * simulating the whole system in each pane means no particle state ever has to cross a process
- * boundary. Determinism is what keeps them agreeing: a shared seed, a fixed timestep, and a tick
- * count derived from a shared epoch instead of from frame deltas.
+ * Every pane runs the identical scene rather than only its own blob. That is deliberate — anything
+ * drifting from one screen toward another has to be drawn by whichever pane it enters, and computing
+ * the whole thing in each pane means no state ever crosses a process boundary. Determinism keeps them
+ * agreeing: a shared seed, a fixed timestep, and a tick count derived from a shared epoch rather than
+ * from frame deltas.
  */
 import type { Settings } from "@shared/settings";
-import { colourForIndex, themeById, type Theme } from "@shared/themes";
+import { hexToRgb, themeById, type Rgb } from "@shared/themes";
 import type { DisplayInfo, SurfacePayload } from "@shared/types";
 import { BlobPoints } from "./gfx/blobPoints";
+import { MistField, type MistWell } from "./gfx/mistField";
 import { Stage } from "./gfx/stage";
 import { BlobWorld, DEFAULT_SIM_CONFIG, type SimConfig, type Well } from "./sim/world";
 
@@ -20,12 +21,39 @@ type WallpaperBridge = {
   onSettings: (callback: (settings: Settings) => void) => void;
 };
 
+const bridge = (globalThis as unknown as { wallpaper: WallpaperBridge }).wallpaper;
+const canvas = document.getElementById("gl") as HTMLCanvasElement;
+const hud = document.getElementById("hud")!;
+
+/**
+ * Base mist radius before the size multiplier.
+ *
+ * The visible cloud reaches well beyond this, since the density boundary is soft on both sides, so
+ * this is noticeably smaller than it looks like it should be.
+ */
+const MIST_RADIUS = 195;
+
+function colourFor(settings: Settings, index: number): Rgb {
+  return hexToRgb(settings.colours[index % settings.colours.length] ?? "#ffffff");
+}
+
+/** Screen coordinates are Y-down, world coordinates are Y-up. */
+function wellFor(display: DisplayInfo, index: number, settings: Settings): Well {
+  const b = display.bounds;
+  return {
+    displayId: display.id,
+    x: b.x + b.width / 2,
+    y: -(b.y + b.height / 2),
+    mass: (b.width * b.height) / (1920 * 1080),
+    colour: colourFor(settings, index),
+  };
+}
+
 /**
  * Fold user settings into the tuned simulation defaults.
  *
- * Settings are multipliers rather than raw constants, so the defaults stay the single source of
- * truth for the look and these only scale it. Particle counts are rounded because they size typed
- * arrays.
+ * Settings are multipliers, so the defaults stay the single source of truth for the look. Particle
+ * counts are rounded because they size typed arrays.
  */
 function configFor(settings: Settings): SimConfig {
   const base = DEFAULT_SIM_CONFIG;
@@ -36,38 +64,20 @@ function configFor(settings: Settings): SimConfig {
     bridgeParticles: Math.max(50, Math.round(base.bridgeParticles * settings.density)),
     blobRadius: base.blobRadius * settings.size,
     driftSpeed: base.driftSpeed * settings.motion,
-    // Speed is the inverse of travel time, so a higher multiplier has to shorten it.
+    // Speed is the inverse of travel time, so a higher multiplier shortens it.
     bridgeTravelSeconds: base.bridgeTravelSeconds / Math.max(0.05, settings.streamSpeed),
   };
 }
 
-/** Whether a change needs the whole world rebuilt, or can be applied to the running one. */
+/** Only these change the size of the particle arrays, so only these need a new world. */
 function needsRebuild(a: Settings, b: Settings): boolean {
   return a.density !== b.density || a.themeId !== b.themeId;
 }
 
-const bridge = (globalThis as unknown as { wallpaper: WallpaperBridge }).wallpaper;
-const canvas = document.getElementById("gl") as HTMLCanvasElement;
-const hud = document.getElementById("hud")!;
-
-/** Screen coordinates are Y-down, world coordinates are Y-up. */
-function wellFor(display: DisplayInfo, index: number, theme: Theme): Well {
-  const b = display.bounds;
-  return {
-    displayId: display.id,
-    x: b.x + b.width / 2,
-    y: -(b.y + b.height / 2),
-    // Screen area relative to 1080p. Unused by the kinematic model, kept so blob scale could follow
-    // monitor size later.
-    mass: (b.width * b.height) / (1920 * 1080),
-    colour: colourForIndex(theme, index),
-  };
-}
-
-
 class Pane {
   private world: BlobWorld | null = null;
   private points: BlobPoints | null = null;
+  private mist: MistField | null = null;
   private stage: Stage | null = null;
   private payload: SurfacePayload | null = null;
   private settings: Settings | null = null;
@@ -84,52 +94,71 @@ class Pane {
     if (payload.hud) hud.dataset["enabled"] = "1";
     else delete hud.dataset["enabled"];
 
-    // Blobs sit dead centre on their screen, as in the reference. The interaction is carried by the
-    // stream between them rather than by displacing the clouds.
+    if (!this.stage) this.stage = new Stage(canvas, payload.region);
+    else this.stage.resize(payload.region);
+
+    // Mist is raymarched per pixel, so it renders at reduced resolution and is upscaled. The result
+    // is soft by nature, which hides the loss, and it is the difference between comfortably hitting
+    // frame rate and not.
     const theme = themeById(payload.settings.themeId);
-    const wells = payload.layout.displays.map((d, i) => wellFor(d, i, theme));
-    const config = configFor(payload.settings);
+    this.stage.setResolutionScale(theme.id === "aether" ? 0.62 : 1);
+    this.stage.resize(payload.region);
 
-    if (!this.stage) {
-      this.stage = new Stage(canvas, payload.region);
-    } else {
-      this.stage.resize(payload.region);
-    }
-
-    if (!this.world) {
-      this.world = new BlobWorld(wells, config, payload.seed);
-    } else if (this.world.wellCount !== wells.length) {
-      // Particle count is tied to the number of wells, so a display being added or removed needs a
-      // fresh world; anything else can be reconfigured in place.
-      //
-      // The old points must leave the scene graph before being disposed. Disposing only frees the
-      // geometry and material — the object itself stays in the scene, so skipping the removal leaves
-      // a disposed object being drawn alongside its replacement.
-      if (this.points) {
-        this.stage.scene.remove(this.points.points);
-        this.points.dispose();
-        this.points = null;
-      }
-      this.world = new BlobWorld(wells, config, payload.seed);
-    } else {
-      this.world.reconfigure(wells);
-    }
-
-    if (!this.points) {
-      this.points = new BlobPoints(this.world, window.devicePixelRatio || 1);
-      this.stage.scene.add(this.points.points);
-    }
-    this.points.setPixelScale((window.devicePixelRatio || 1) * payload.settings.particleScale);
-    this.points.setBrightness(payload.settings.brightness);
+    this.teardownVisuals();
+    if (theme.id === "aether") this.buildMist(payload);
+    else this.buildFilament(payload);
 
     if (first) requestAnimationFrame(this.frame);
+  }
+
+  private teardownVisuals(): void {
+    if (!this.stage) return;
+    if (this.points) {
+      this.stage.scene.remove(this.points.points);
+      this.points.dispose();
+      this.points = null;
+      this.world = null;
+    }
+    if (this.mist) {
+      this.stage.scene.remove(this.mist.mesh);
+      this.mist.dispose();
+      this.mist = null;
+    }
+  }
+
+  private buildFilament(payload: SurfacePayload): void {
+    const wells = payload.layout.displays.map((d, i) => wellFor(d, i, payload.settings));
+    this.world = new BlobWorld(wells, configFor(payload.settings), payload.seed);
+    this.points = new BlobPoints(this.world, window.devicePixelRatio || 1);
+    this.stage!.scene.add(this.points.points);
+    this.points.setPixelScale((window.devicePixelRatio || 1) * payload.settings.particleScale);
+    this.points.setBrightness(payload.settings.brightness);
+  }
+
+  private mistWells(settings: Settings): MistWell[] {
+    return (this.payload?.layout.displays ?? []).map((d, i) => {
+      const b = d.bounds;
+      return {
+        x: b.x + b.width / 2,
+        y: -(b.y + b.height / 2),
+        colour: colourFor(settings, i),
+      };
+    });
+  }
+
+  private buildMist(payload: SurfacePayload): void {
+    const radius = MIST_RADIUS * payload.settings.size;
+    this.mist = new MistField(payload.region, this.mistWells(payload.settings), radius);
+    this.mist.setBrightness(payload.settings.brightness);
+    this.mist.setDetail(payload.settings.density);
+    this.stage!.scene.add(this.mist.mesh);
   }
 
   /**
    * Apply a settings change to the running pane.
    *
-   * Only density and theme change the particle arrays, so only those rebuild the world; everything
-   * else is a uniform or a simulation constant and can be swapped without a visible reset.
+   * Rebuilding is avoided wherever possible: recreating the scene on every slider movement would
+   * make the wallpaper flicker while it is being tuned.
    */
   applySettings(next: Settings): void {
     const previous = this.settings;
@@ -141,26 +170,38 @@ class Pane {
       return;
     }
 
-    const theme = themeById(next.themeId);
-    this.world?.retune(
-      configFor(next),
-      this.payload.layout.displays.map((d, i) => wellFor(d, i, theme)),
-    );
+    if (this.mist) {
+      this.mist.setWells(this.mistWells(next), MIST_RADIUS * next.size);
+      this.mist.setBrightness(next.brightness);
+      this.mist.setDetail(next.density);
+      return;
+    }
+
+    const wells = this.payload.layout.displays.map((d, i) => wellFor(d, i, next));
+    this.world?.retune(configFor(next), wells);
+    // Colours live in the particle buffers, so they have to be re-applied explicitly — without this
+    // a colour change updates nothing visible.
+    this.world?.recolour();
     this.points?.setPixelScale((window.devicePixelRatio || 1) * next.particleScale);
     this.points?.setBrightness(next.brightness);
   }
 
   private readonly frame = (now: number): void => {
     requestAnimationFrame(this.frame);
-    const { world, points, stage, payload } = this;
-    if (!world || !points || !stage || !payload) return;
+    const { stage, payload, settings } = this;
+    if (!stage || !payload || !settings) return;
 
-    // Absolute tick from the shared epoch, so panes converge on the same simulation time no matter
-    // how their individual frame timing drifts.
+    // Absolute time from the shared epoch, so panes converge on the same state no matter how their
+    // individual frame timing drifts.
     const elapsed = Math.max(0, Date.now() - payload.epochMs) / 1000;
-    world.advanceTo(Math.floor(elapsed / DEFAULT_SIM_CONFIG.timeStep));
 
-    points.sync();
+    if (this.mist) {
+      this.mist.setTime(elapsed * settings.motion);
+    } else if (this.world && this.points) {
+      this.world.advanceTo(Math.floor(elapsed / DEFAULT_SIM_CONFIG.timeStep));
+      this.points.sync();
+    }
+
     stage.render();
 
     this.frames += 1;
@@ -173,13 +214,13 @@ class Pane {
   };
 
   private updateHud(): void {
-    if (!this.payload || !this.world) return;
-    if (!hud.dataset["enabled"]) return;
+    if (!this.payload || !hud.dataset["enabled"]) return;
     const r = this.payload.region;
+    const theme = themeById(this.payload.settings.themeId);
+    const detail = this.world ? `${this.world.count} particles` : "volumetric mist";
     hud.textContent =
-      `${r.width}x${r.height} @${r.x},${r.y}  |  ` +
-      `${this.world.count} particles / ${this.world.wellCount} wells  |  ` +
-      `${this.fps.toFixed(0)} fps  |  ${this.stage?.info ?? ""}`;
+      `${theme.name}  |  ${r.width}x${r.height} @${r.x},${r.y}  |  ` +
+      `${detail}  |  ${this.fps.toFixed(0)} fps  |  ${this.stage?.info ?? ""}`;
   }
 }
 

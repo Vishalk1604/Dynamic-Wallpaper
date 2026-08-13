@@ -63,6 +63,7 @@ export class WallpaperTray {
         label: "Theme",
         submenu: THEMES.map((theme) => ({
           label: theme.name,
+          sublabel: theme.description,
           type: "radio" as const,
           checked: theme.id === current.themeId,
           click: () => this.settings.update({ themeId: theme.id }),
