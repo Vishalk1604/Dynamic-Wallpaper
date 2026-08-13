@@ -19,10 +19,12 @@ export type BloomSettings = {
 };
 
 export const DEFAULT_BLOOM: BloomSettings = {
-  strength: 1.8,
-  radius: 0.85,
-  // Low, because additive particle overlap is the thing meant to bloom, and that sits well below 1.
-  threshold: 0.04,
+  // Restrained on purpose. The reference keeps its particles as crisp, individually visible dots with
+  // only a slight halo; a strong low-threshold bloom smears them into a single luminous smudge and
+  // loses the granularity that makes the cloud read as particles at all.
+  strength: 0.7,
+  radius: 0.6,
+  threshold: 0.22,
 };
 
 export class Stage {

@@ -40,15 +40,19 @@ precision highp float;
 varying float vAlpha;
 varying vec3 vColour;
 
+uniform float brightness;
+
 void main() {
-  // Radial falloff from the point's centre. Squaring it tightens the core and softens the halo,
-  // which reads more like a glowing mote than a flat disc.
   float d = length(gl_PointCoord - vec2(0.5)) * 2.0;
   if (d > 1.0) discard;
-  float falloff = 1.0 - d;
-  float intensity = falloff * falloff * vAlpha;
+
+  // A solid core out to roughly half the radius, then a short soft rim. A smooth radial falloff
+  // instead of this makes every particle a faint smudge, and the cloud stops reading as individual
+  // particles at all — the reference keeps its dots crisp and distinctly visible.
+  float intensity = smoothstep(1.0, 0.45, d) * vAlpha;
   if (intensity < 0.004) discard;
-  gl_FragColor = vec4(vColour * intensity, intensity);
+
+  gl_FragColor = vec4(vColour * intensity * brightness, intensity);
 }
 `;
 
@@ -70,7 +74,11 @@ export class BlobPoints {
     this.material = new ShaderMaterial({
       vertexShader: VERTEX_SHADER,
       fragmentShader: FRAGMENT_SHADER,
-      uniforms: { pixelScale: { value: pixelScale } },
+      uniforms: {
+        pixelScale: { value: pixelScale },
+        // Above 1 so colours stay vivid where particles overlap, rather than washing toward grey.
+        brightness: { value: 1.35 },
+      },
       blending: AdditiveBlending,
       depthWrite: false,
       depthTest: false,
@@ -81,10 +89,16 @@ export class BlobPoints {
     this.points.frustumCulled = false;
   }
 
-  /** Push the simulation's latest positions and colours to the GPU. */
+  /**
+   * Push the simulation's latest state to the GPU.
+   *
+   * Alpha is included because stream particles fade in and out along their travel, so it changes
+   * every frame rather than being fixed at build time.
+   */
   sync(): void {
     (this.geometry.getAttribute("position") as BufferAttribute).needsUpdate = true;
     (this.geometry.getAttribute("colour") as BufferAttribute).needsUpdate = true;
+    (this.geometry.getAttribute("alpha") as BufferAttribute).needsUpdate = true;
   }
 
   setPixelScale(scale: number): void {

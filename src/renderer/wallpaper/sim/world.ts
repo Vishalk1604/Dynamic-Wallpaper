@@ -1,181 +1,263 @@
 /**
- * The simulation: one gravity well per screen, and a cloud of particles orbiting in the combined
- * field of all of them.
+ * The blob field: a kinematic model, deliberately not a gravity simulation.
  *
- * World space is virtual-desktop physical pixels with Y negated so that Y increases upward, matching
- * the orthographic cameras. Wells sit in the z = 0 plane while particles orbit in full 3D, which is
- * what gives each blob volume rather than looking like a flat disc.
+ * An earlier version integrated real gravity with damping and an orbital thermostat. It looked right
+ * for about a minute and then collapsed: damping bleeds energy, particles spiral inward, and after ten
+ * minutes each blob is a blown-out core surrounded by a thin diffuse halo. That is not a tuning
+ * problem, it is what integrating an attractive force with any energy loss does, and a wallpaper has
+ * to look the same after ten hours as it did at startup.
  *
- * Nothing here may use `Math.random`, `Date.now` or the frame delta: every pane runs this same
- * simulation independently and they must stay identical, so all randomness comes from the shared
- * seed and time advances only in fixed steps.
+ * So the shape is imposed instead of emergent, and each element is chosen to be exactly stable:
+ *
+ *   - Blob particles drift in straight lines and reflect off a sphere of fixed radius. Reflection is
+ *     energy-conserving by construction, so the cloud can neither collapse nor spread. It churns
+ *     forever at constant density.
+ *   - Bridge particles are a pure function of time: position comes from a phase that wraps, never
+ *     from accumulated state, so a stream cannot drift or decay.
+ *   - Each blob also carries a small cluster in its neighbour's colour at its centre, which is what
+ *     makes the stream read as arriving somewhere rather than just stopping.
+ *
+ * World space is virtual-desktop physical pixels with Y negated so Y increases upward. Blobs sit in
+ * the z = 0 plane and particles occupy full 3D, which gives them volume rather than flatness.
+ *
+ * Nothing here may use `Math.random`, `Date.now` or a frame delta: every pane runs this same model
+ * and they must agree, so randomness comes from the shared seed and time advances in fixed steps.
  */
 import { createRandom, type Random } from "./rng";
 import type { Rgb } from "@shared/palette";
 
 export type Well = {
   displayId: number;
-  /** World position; wells always lie in the z = 0 plane. */
   x: number;
   y: number;
+  /** Unused by the kinematic model; kept so callers can weight blob size by screen area. */
   mass: number;
   colour: Rgb;
 };
 
 export type SimConfig = {
-  /** Gravitational constant, in px^3 / (mass * s^2). Tuned against pixel-scale distances. */
-  gravity: number;
-  /** Plummer softening length, in px. Removes the singularity at a well's centre. */
-  softening: number;
-  particlesPerWell: number;
-  /** Target cloud radius, in px. */
+  /** Particles in each blob's main cloud. */
+  blobParticles: number;
+  /** Particles in the neighbour-coloured cluster at each blob's centre. */
+  coreParticles: number;
+  /** Particles in each directed stream between two blobs. */
+  bridgeParticles: number;
+  /** Blob radius in px. */
   blobRadius: number;
-  /** Velocity retained per second. Slightly below 1 so the cloud cannot slowly heat up. */
-  drag: number;
-  /** How strongly speeds are nudged toward the local circular-orbit speed, per second. */
-  orbitCorrection: number;
-  /** Beyond this multiple of blobRadius a particle is treated as unbound and left to fall freely. */
-  captureFactor: number;
-  /** Beyond this multiple of blobRadius from every well, a particle is recycled. */
-  escapeFactor: number;
-  /** How fast a transferred particle takes on its new well's colour, per second. */
-  colourBlend: number;
+  /** Central cluster radius, as a fraction of blobRadius. */
+  coreRadiusFactor: number;
+  /**
+   * Inner edge of the blob's shell, as a fraction of its radius.
+   *
+   * Particles occupy a hollow shell rather than a filled sphere, which matters for two reasons. A
+   * filled sphere has far more depth through the middle, so additive blending saturates the centre to
+   * white and the blob loses its colour entirely. It also hides the neighbour-coloured cluster inside
+   * it. A shell keeps the blob evenly coloured and lets the core show through.
+   */
+  shellInner: number;
+  /** Inner edge of the central cluster's shell, as a fraction of its own radius. */
+  coreShellInner: number;
+  /** Drift speed of blob particles, in px/s. */
+  driftSpeed: number;
+  /** How long a bridge particle takes to travel end to end, in seconds. */
+  bridgeTravelSeconds: number;
+  /** Half-width of a stream at its source, in px. */
+  bridgeWidth: number;
   timeStep: number;
 };
 
 export const DEFAULT_SIM_CONFIG: SimConfig = {
-  gravity: 5200,
-  softening: 26,
-  particlesPerWell: 8000,
-  // Large relative to the gap between screens on purpose. This is what makes the interaction real
-  // rather than faked: the balance point between two equal wells sits midway between them, so the
-  // clouds have to be big enough to actually reach it before any particle can cross.
-  blobRadius: 380,
-  drag: 0.994,
-  // Kept low on purpose. This is the knob that holds the cloud together, and it directly opposes the
-  // neighbouring well's pull — at 1.5 it flattened the lean between blobs to about 20px, which barely
-  // read as interaction at all. Low enough to let the field distort the cloud, with drag and the
-  // escape-and-respawn rule providing the remaining stability.
-  orbitCorrection: 0.6,
-  // Generous, so the outer fringe of each cloud is left unbound and free to drift toward the
-  // neighbouring screen. This is what produces the stream across the bezel.
-  captureFactor: 2.4,
-  escapeFactor: 9,
-  colourBlend: 0.5,
+  blobParticles: 3400,
+  coreParticles: 700,
+  bridgeParticles: 820,
+  blobRadius: 215,
+  coreRadiusFactor: 0.34,
+  shellInner: 0.78,
+  coreShellInner: 0.6,
+  driftSpeed: 26,
+  bridgeTravelSeconds: 9,
+  bridgeWidth: 150,
   timeStep: 1 / 120,
 };
 
+/** Particle roles, laid out contiguously so each update loop stays tight. */
+const KIND_BLOB = 0;
+const KIND_CORE = 1;
+const KIND_BRIDGE = 2;
+
 export class BlobWorld {
-  readonly count: number;
   readonly positions: Float32Array;
   readonly colours: Float32Array;
   readonly sizes: Float32Array;
   readonly alphas: Float32Array;
 
   private readonly velocities: Float32Array;
-  private readonly home: Int32Array;
-  private readonly random: Random;
+  /** For blob and core particles: which well they orbit. For bridge particles: the source well. */
+  private readonly anchor: Int32Array;
+  /** Bridge particles only: destination well. */
+  private readonly target: Int32Array;
+  /** Outer bounce radius for blob and core particles; phase offset for bridge particles. */
+  private readonly extent: Float32Array;
+  /** Inner bounce radius, keeping shell particles out of the middle. */
+  private readonly innerExtent: Float32Array;
+  /** Bridge particles only: lateral offsets within the stream, and a jitter phase. */
+  private readonly lateral: Float32Array;
+  private readonly kind: Uint8Array;
+  /** Base alpha before any along-stream fade is applied. */
+  private readonly baseAlpha: Float32Array;
+
   private readonly config: SimConfig;
+  private readonly random: Random;
   private wells: Well[];
   private tick = 0;
+  /** Boundary between the sphere-bounded particles and the stream particles. */
+  private coreEnd = 0;
+
+  readonly count: number;
 
   constructor(wells: Well[], config: SimConfig, seed: number) {
     this.config = config;
     this.wells = wells;
     this.random = createRandom(seed);
-    this.count = Math.max(1, wells.length) * config.particlesPerWell;
+
+    const wellCount = Math.max(1, wells.length);
+    const pairs = Math.max(0, wellCount * (wellCount - 1));
+    this.count =
+      wellCount * config.blobParticles + pairs * config.coreParticles + pairs * config.bridgeParticles;
 
     this.positions = new Float32Array(this.count * 3);
     this.velocities = new Float32Array(this.count * 3);
     this.colours = new Float32Array(this.count * 3);
+    this.lateral = new Float32Array(this.count * 3);
     this.sizes = new Float32Array(this.count);
     this.alphas = new Float32Array(this.count);
-    this.home = new Int32Array(this.count);
+    this.baseAlpha = new Float32Array(this.count);
+    this.extent = new Float32Array(this.count);
+    this.innerExtent = new Float32Array(this.count);
+    this.anchor = new Int32Array(this.count);
+    this.target = new Int32Array(this.count);
+    this.kind = new Uint8Array(this.count);
 
-    this.seedParticles();
+    this.build();
   }
 
   get wellCount(): number {
     return this.wells.length;
   }
 
-  private seedParticles(): void {
-    const { particlesPerWell } = this.config;
-    for (let i = 0; i < this.count; i++) {
-      const wellIndex = this.wells.length > 0 ? Math.floor(i / particlesPerWell) % this.wells.length : 0;
-      this.home[i] = wellIndex;
-      // Wide size spread with a large maximum. Density alone cannot build brightness at this
-      // particle count — roughly 0.06 particles per pixel — so the glow has to come from many large
-      // sprites overlapping additively.
-      this.sizes[i] = this.random.range(2, 11);
-      this.alphas[i] = this.random.range(0.35, 0.95);
-      const colour = this.wells[wellIndex]?.colour ?? [1, 1, 1];
-      this.colours[i * 3 + 0] = colour[0];
-      this.colours[i * 3 + 1] = colour[1];
-      this.colours[i * 3 + 2] = colour[2];
-      this.spawn(i, wellIndex);
+  private setColour(index: number, colour: Rgb): void {
+    const i3 = index * 3;
+    this.colours[i3] = colour[0];
+    this.colours[i3 + 1] = colour[1];
+    this.colours[i3 + 2] = colour[2];
+  }
+
+  private build(): void {
+    const {
+      blobParticles,
+      coreParticles,
+      bridgeParticles,
+      blobRadius,
+      coreRadiusFactor,
+      shellInner,
+      coreShellInner,
+    } = this.config;
+    const wells = this.wells;
+    let index = 0;
+
+    // Main clouds.
+    for (let w = 0; w < Math.max(1, wells.length); w++) {
+      const colour = wells[w]?.colour ?? ([1, 1, 1] as Rgb);
+      for (let n = 0; n < blobParticles; n++, index++) {
+        this.kind[index] = KIND_BLOB;
+        this.anchor[index] = w;
+        this.extent[index] = blobRadius;
+        this.innerExtent[index] = blobRadius * shellInner;
+        this.sizes[index] = this.random.range(2.4, 8.5);
+        this.baseAlpha[index] = this.random.range(0.65, 1);
+        this.alphas[index] = this.baseAlpha[index];
+        this.setColour(index, colour);
+        this.placeInSphere(index, w, blobRadius, shellInner);
+      }
+    }
+
+    // Neighbour-coloured cluster at the centre of each blob, one per incoming stream.
+    for (let from = 0; from < wells.length; from++) {
+      for (let to = 0; to < wells.length; to++) {
+        if (from === to) continue;
+        const colour = wells[from].colour;
+        const radius = blobRadius * coreRadiusFactor;
+        for (let n = 0; n < coreParticles; n++, index++) {
+          this.kind[index] = KIND_CORE;
+          this.anchor[index] = to;
+          this.extent[index] = radius;
+          this.innerExtent[index] = radius * coreShellInner;
+          this.sizes[index] = this.random.range(2.2, 7);
+          this.baseAlpha[index] = this.random.range(0.55, 0.9);
+          this.alphas[index] = this.baseAlpha[index];
+          this.setColour(index, colour);
+          this.placeInSphere(index, to, radius, coreShellInner);
+        }
+      }
+    }
+    this.coreEnd = index;
+
+    // Directed streams.
+    for (let from = 0; from < wells.length; from++) {
+      for (let to = 0; to < wells.length; to++) {
+        if (from === to) continue;
+        const colour = wells[from].colour;
+        for (let n = 0; n < bridgeParticles; n++, index++) {
+          this.kind[index] = KIND_BRIDGE;
+          this.anchor[index] = from;
+          this.target[index] = to;
+          // Phase offsets spread evenly so the stream is continuous rather than pulsing.
+          this.extent[index] = this.random.next();
+          this.sizes[index] = this.random.range(2, 6.5);
+          this.baseAlpha[index] = this.random.range(0.6, 1);
+          this.alphas[index] = 0;
+          this.setColour(index, colour);
+          const l3 = index * 3;
+          this.lateral[l3] = this.random.range(-1, 1);
+          this.lateral[l3 + 1] = this.random.range(-1, 1);
+          this.lateral[l3 + 2] = this.random.range(0, Math.PI * 2);
+        }
+      }
     }
   }
 
-  /**
-   * Place a particle on a near-circular orbit around its well.
-   *
-   * Randomising the orbital plane per particle is what makes the cloud a sphere: the orbits are
-   * individually circular but collectively cover every orientation. It also means the blob holds its
-   * shape from angular momentum rather than from any artificial containment.
-   */
-  private spawn(index: number, wellIndex: number): void {
+  /** Somewhere in a hollow shell around the well, with a small random drift velocity. */
+  private placeInSphere(index: number, wellIndex: number, radius: number, shellInner: number): void {
     const well = this.wells[wellIndex];
-    if (!well) return;
-    const { gravity, blobRadius, softening } = this.config;
     const i3 = index * 3;
-
     const dir: [number, number, number] = [0, 0, 0];
     this.random.onSphere(dir);
-    // Cube-root keeps the interior from being sparser than the shell.
-    const radius = blobRadius * Math.cbrt(this.random.range(0.06, 1));
+    const r = radius * (shellInner + (1 - shellInner) * this.random.next());
 
-    this.positions[i3 + 0] = well.x + dir[0] * radius;
-    this.positions[i3 + 1] = well.y + dir[1] * radius;
-    this.positions[i3 + 2] = dir[2] * radius;
+    this.positions[i3] = (well?.x ?? 0) + dir[0] * r;
+    this.positions[i3 + 1] = (well?.y ?? 0) + dir[1] * r;
+    this.positions[i3 + 2] = dir[2] * r;
 
-    // Circular-orbit speed for the softened potential at this radius.
-    const denom = Math.sqrt(radius * radius + softening * softening);
-    const speed = Math.sqrt((gravity * well.mass * radius * radius) / (denom * denom * denom)) || 0;
-
-    // Any axis not parallel to the radius gives a valid orbital plane.
-    const axis: [number, number, number] = [0, 0, 0];
-    this.random.onSphere(axis);
-    let tx = dir[1] * axis[2] - dir[2] * axis[1];
-    let ty = dir[2] * axis[0] - dir[0] * axis[2];
-    let tz = dir[0] * axis[1] - dir[1] * axis[0];
-    const len = Math.hypot(tx, ty, tz);
-    if (len < 1e-6) {
-      tx = -dir[1];
-      ty = dir[0];
-      tz = 0;
-    } else {
-      tx /= len;
-      ty /= len;
-      tz /= len;
-    }
-
-    const jitter = this.random.range(0.86, 1.1);
-    this.velocities[i3 + 0] = tx * speed * jitter;
-    this.velocities[i3 + 1] = ty * speed * jitter;
-    this.velocities[i3 + 2] = tz * speed * jitter;
+    const vel: [number, number, number] = [0, 0, 0];
+    this.random.onSphere(vel);
+    const speed = this.config.driftSpeed * this.random.range(0.35, 1);
+    this.velocities[i3] = vel[0] * speed;
+    this.velocities[i3 + 1] = vel[1] * speed;
+    this.velocities[i3 + 2] = vel[2] * speed;
   }
 
-  /** Rebuild for a new display arrangement, keeping particle identity where the well still exists. */
+  /** Rebuild positions for a new display arrangement; particle roles and colours are unchanged. */
   reconfigure(wells: Well[]): void {
     this.wells = wells;
     for (let i = 0; i < this.count; i++) {
-      if (this.home[i] >= wells.length) this.home[i] = wells.length > 0 ? i % wells.length : 0;
-      this.spawn(i, this.home[i]);
+      if (this.kind[i] === KIND_BRIDGE) continue;
+      const anchor = Math.min(this.anchor[i], Math.max(0, wells.length - 1));
+      this.anchor[i] = anchor;
+      const outer = this.extent[i];
+      this.placeInSphere(i, anchor, outer, outer > 0 ? this.innerExtent[i] / outer : 0);
     }
   }
 
-  /** Advance to the given absolute tick, capped so a stall cannot spiral into a long catch-up. */
   advanceTo(targetTick: number, maxSteps = 8): void {
     let steps = 0;
     while (this.tick < targetTick && steps < maxSteps) {
@@ -183,105 +265,117 @@ export class BlobWorld {
       this.tick += 1;
       steps += 1;
     }
-    // Too far behind to catch up honestly; resynchronise rather than accumulate lag forever.
     if (this.tick < targetTick) this.tick = targetTick;
   }
 
   private step(): void {
-    const { gravity, softening, timeStep: dt, drag, orbitCorrection, blobRadius } = this.config;
+    const dt = this.config.timeStep;
     const wells = this.wells;
     if (wells.length === 0) return;
 
-    const soft2 = softening * softening;
-    const captureRadius = blobRadius * this.config.captureFactor;
-    const escapeRadius = blobRadius * this.config.escapeFactor;
-    const dragFactor = Math.pow(drag, dt);
-    const colourStep = Math.min(1, this.config.colourBlend * dt);
+    this.stepBounded(0, this.coreEnd, dt);
+    this.stepBridges(this.coreEnd, this.count, this.tick * dt);
+  }
 
-    for (let i = 0; i < this.count; i++) {
+  /**
+   * Straight-line drift with elastic reflection off the anchor sphere.
+   *
+   * The reflection is what makes this stable forever: the velocity is mirrored about the surface
+   * normal, so speed is preserved exactly and no energy enters or leaves the system.
+   */
+  private stepBounded(start: number, end: number, dt: number): void {
+    for (let i = start; i < end; i++) {
       const i3 = i * 3;
-      const px = this.positions[i3];
-      const py = this.positions[i3 + 1];
-      const pz = this.positions[i3 + 2];
+      const well = this.wells[this.anchor[i]];
+      if (!well) continue;
+      const radius = this.extent[i];
 
-      let ax = 0;
-      let ay = 0;
-      let az = 0;
-      let nearest = 0;
-      let nearestDist2 = Infinity;
+      let x = this.positions[i3] + this.velocities[i3] * dt;
+      let y = this.positions[i3 + 1] + this.velocities[i3 + 1] * dt;
+      let z = this.positions[i3 + 2] + this.velocities[i3 + 2] * dt;
 
-      // Every particle sees the identical field. An earlier version boosted the pull from wells other
-      // than the particle's own to make the interaction visible, which produced a bug worth
-      // remembering: as soon as a particle drifted close enough to be captured, its home flipped, the
-      // boost flipped with it, and it was yanked back. Particles piled up at a spurious equilibrium
-      // between the blobs instead of reaching either one. Per-particle asymmetry in a shared field is
-      // never safe; the lean now comes from displacing the wells themselves.
-      for (let w = 0; w < wells.length; w++) {
-        const well = wells[w];
-        const dx = well.x - px;
-        const dy = well.y - py;
-        const dz = -pz;
-        const plain = dx * dx + dy * dy + dz * dz;
-        if (plain < nearestDist2) {
-          nearestDist2 = plain;
-          nearest = w;
-        }
-        const d2 = plain + soft2;
-        // G * M / d^3, so multiplying by the displacement gives the acceleration.
-        const inv = (gravity * well.mass) / (d2 * Math.sqrt(d2));
-        ax += dx * inv;
-        ay += dy * inv;
-        az += dz * inv;
+      const dx = x - well.x;
+      const dy = y - well.y;
+      const dz = z;
+      const dist = Math.hypot(dx, dy, dz);
+
+      // Both bounds are reflective. Without the inner one, particles would gradually wander through
+      // the middle and refill the sphere, undoing the shell within a few minutes.
+      const inner = this.innerExtent[i];
+      const outside = dist > radius;
+      const inside = dist < inner;
+
+      if ((outside || inside) && dist > 1e-6) {
+        const nx = dx / dist;
+        const ny = dy / dist;
+        const nz = dz / dist;
+        const vn =
+          this.velocities[i3] * nx + this.velocities[i3 + 1] * ny + this.velocities[i3 + 2] * nz;
+        this.velocities[i3] -= 2 * vn * nx;
+        this.velocities[i3 + 1] -= 2 * vn * ny;
+        this.velocities[i3 + 2] -= 2 * vn * nz;
+        // Seat it just inside the boundary it crossed so it cannot reflect every frame in place.
+        const seated = outside ? radius * 0.999 : inner * 1.001;
+        x = well.x + nx * seated;
+        y = well.y + ny * seated;
+        z = nz * seated;
       }
 
-      let vx = (this.velocities[i3] + ax * dt) * dragFactor;
-      let vy = (this.velocities[i3 + 1] + ay * dt) * dragFactor;
-      let vz = (this.velocities[i3 + 2] + az * dt) * dragFactor;
+      this.positions[i3] = x;
+      this.positions[i3 + 1] = y;
+      this.positions[i3 + 2] = z;
+    }
+  }
 
-      // A particle that drifts closer to another well than to its own has been captured: it belongs
-      // to that blob now, and its colour follows. This is what makes the stream between two screens
-      // read as material moving from one to the other.
-      if (nearest !== this.home[i] && nearestDist2 < captureRadius * captureRadius) {
-        this.home[i] = nearest;
-      }
+  /**
+   * Streams, evaluated straight from elapsed time rather than integrated.
+   *
+   * Being a pure function of time means there is no state to drift, so the stream looks the same
+   * after ten hours as at startup — the same reason the blobs use reflection.
+   */
+  private stepBridges(start: number, end: number, time: number): void {
+    const { bridgeTravelSeconds, bridgeWidth } = this.config;
+    const rate = 1 / bridgeTravelSeconds;
 
-      const homeWell = wells[this.home[i]] ?? wells[nearest];
-      const hx = px - homeWell.x;
-      const hy = py - homeWell.y;
-      const r = Math.hypot(hx, hy, pz);
-
-      if (r < captureRadius) {
-        // Bound: hold the orbit near circular so the cloud keeps a stable radius over hours.
-        // Unbound particles are deliberately left alone so they can stream away freely.
-        const denom = Math.sqrt(r * r + soft2);
-        const target = Math.sqrt((gravity * homeWell.mass * r * r) / (denom * denom * denom));
-        const speed = Math.hypot(vx, vy, vz);
-        if (speed > 1e-4 && target > 1e-4) {
-          const scale = 1 + Math.min(1, orbitCorrection * dt) * (target / speed - 1);
-          vx *= scale;
-          vy *= scale;
-          vz *= scale;
-        }
-      }
-
-      this.velocities[i3] = vx;
-      this.velocities[i3 + 1] = vy;
-      this.velocities[i3 + 2] = vz;
-
-      this.positions[i3] = px + vx * dt;
-      this.positions[i3 + 1] = py + vy * dt;
-      this.positions[i3 + 2] = pz + vz * dt;
-
-      if (r > escapeRadius) {
-        this.spawn(i, this.home[i]);
+    for (let i = start; i < end; i++) {
+      const i3 = i * 3;
+      const from = this.wells[this.anchor[i]];
+      const to = this.wells[this.target[i]];
+      if (!from || !to) {
+        this.alphas[i] = 0;
         continue;
       }
 
-      const target = homeWell.colour;
-      const c3 = i3;
-      this.colours[c3] += (target[0] - this.colours[c3]) * colourStep;
-      this.colours[c3 + 1] += (target[1] - this.colours[c3 + 1]) * colourStep;
-      this.colours[c3 + 2] += (target[2] - this.colours[c3 + 2]) * colourStep;
+      const t = (time * rate + this.extent[i]) % 1;
+
+      const dx = to.x - from.x;
+      const dy = to.y - from.y;
+      const length = Math.hypot(dx, dy);
+      if (length < 1e-3) {
+        this.alphas[i] = 0;
+        continue;
+      }
+
+      // Pinched waist: wide where it leaves the source, narrow where it arrives, so it reads as a
+      // stream being drawn in rather than a straight tube.
+      const taper = t < 0.5 ? 1.4 - 1.0 * (t / 0.5) : 0.4 - 0.16 * ((t - 0.5) / 0.5);
+      const spread = bridgeWidth * taper;
+
+      // Perpendicular in the xy plane; z is offset directly for thickness.
+      const px = -dy / length;
+      const py = dx / length;
+
+      const wobble = Math.sin(time * 1.7 + this.lateral[i3 + 2]) * 7;
+
+      this.positions[i3] = from.x + dx * t + px * this.lateral[i3] * spread + wobble * px;
+      this.positions[i3 + 1] = from.y + dy * t + py * this.lateral[i3] * spread + wobble * py;
+      this.positions[i3 + 2] = this.lateral[i3 + 1] * spread;
+
+      // Fade in and out at the ends so particles do not pop into existence.
+      let fade = 1;
+      if (t < 0.12) fade = t / 0.12;
+      else if (t > 0.86) fade = (1 - t) / 0.14;
+      this.alphas[i] = this.baseAlpha[i] * fade;
     }
   }
 }

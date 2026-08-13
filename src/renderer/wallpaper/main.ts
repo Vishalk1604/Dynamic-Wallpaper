@@ -22,18 +22,6 @@ const bridge = (globalThis as unknown as { wallpaper: WallpaperBridge }).wallpap
 const canvas = document.getElementById("gl") as HTMLCanvasElement;
 const hud = document.getElementById("hud")!;
 
-/**
- * How far each well is pulled toward its neighbours, as a fraction of the distance between them.
- *
- * The visible lean of a blob toward the next screen comes from here, not from tampering with the
- * force law. Real tidal distortion at this scale goes as (blobRadius / separation) cubed — well under
- * a percent — so something has to be exaggerated for the interaction to be visible at all. Moving the
- * wells is the safe place to do it: the field stays a correct two-body field, just with its centres
- * slightly closer, so the balance point between them and the resulting particle transfer all behave
- * properly.
- */
-const WELL_LEAN = 0.12;
-
 /** Screen coordinates are Y-down, world coordinates are Y-up. */
 function wellFor(display: DisplayInfo, index: number): Well {
   const b = display.bounds;
@@ -48,23 +36,6 @@ function wellFor(display: DisplayInfo, index: number): Well {
   };
 }
 
-/** Shift every well toward the average position of the others, giving each blob its lean. */
-function applyLean(wells: Well[]): Well[] {
-  if (wells.length < 2) return wells;
-  return wells.map((well, index) => {
-    let cx = 0;
-    let cy = 0;
-    for (let i = 0; i < wells.length; i++) {
-      if (i === index) continue;
-      cx += wells[i].x;
-      cy += wells[i].y;
-    }
-    const others = wells.length - 1;
-    cx /= others;
-    cy /= others;
-    return { ...well, x: well.x + (cx - well.x) * WELL_LEAN, y: well.y + (cy - well.y) * WELL_LEAN };
-  });
-}
 
 class Pane {
   private world: BlobWorld | null = null;
@@ -83,7 +54,9 @@ class Pane {
     if (payload.hud) hud.dataset["enabled"] = "1";
     else delete hud.dataset["enabled"];
 
-    const wells = applyLean(payload.layout.displays.map(wellFor));
+    // Blobs sit dead centre on their screen, as in the reference. The interaction is carried by the
+    // stream between them rather than by displacing the clouds.
+    const wells = payload.layout.displays.map(wellFor);
 
     if (!this.stage) {
       this.stage = new Stage(canvas, payload.region);
