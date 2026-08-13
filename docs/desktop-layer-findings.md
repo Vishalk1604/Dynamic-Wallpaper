@@ -133,18 +133,44 @@ rather than assumed. Nothing can drag them: they are click-through and non-activ
 it in Alt+Tab. The ex-style has to be set explicitly, before the window is first shown, because
 Windows caches Alt+Tab eligibility at that point.
 
-## Approaches that would give true behind-icons rendering
+## No child of the desktop hierarchy composites at all
 
-Neither is implemented; recorded so the tradeoff is explicit if the limitation above matters later.
+The natural conclusion from the Chromium failure is that the problem is Chromium-specific, and that
+a native render surface — a plain Win32 window presenting Direct3D — would composite correctly as a
+child, the way a purpose-built wallpaper engine does it. That would justify installing a C++ or Rust
+toolchain to build a presenter addon around Electron's shared-texture offscreen output.
 
-**Native render surface as a child of the wallpaper host.** A plain Win32 window drawing with
-Direct3D or OpenGL has no dependency on being top-level and composites correctly as a child, so it
-can be parented under the icon host. This is how a purpose-built wallpaper engine would do it. It
-means the render surface is no longer Chromium, so the visuals could not be Three.js, and it needs a
-C++ or Rust toolchain — neither of which is installed here.
+It was worth testing that assumption before paying for it, and it is false.
+
+`charmap.exe` was used as the probe: a classic Win32 dialog (`#32770`), pure GDI, no Chromium and no
+DirectComposition anywhere in it. It was converted to `WS_CHILD` and reparented into the desktop
+hierarchy, and its geometry verified each time:
+
+| Parent | Z-order position | Rendered? |
+| --- | --- | --- |
+| WorkerW (child of Progman) | default | no |
+| Progman | `HWND_BOTTOM` | no |
+| Progman | directly below `SHELLDLL_DefView` | no |
+
+Every case reported `parent` correct via `GetAncestor`, `IsWindowVisible` true, and an exact screen
+rect of `300,250 900x650`. Nothing was ever drawn, with the desktop fully exposed and the icons
+themselves rendering normally in the same captures.
+
+So this is not a Chromium limitation. **On this build, Windows composites no foreign child window in
+the desktop hierarchy** — only Explorer's own `SHELLDLL_DefView` renders. A native presenter addon
+would have hit exactly the same wall, so the toolchain install was avoided.
+
+## What is left for true behind-icons rendering
+
+**Adopt the icon host.** Invert the relationship: rather than placing our surface beneath the icons,
+`SetParent` Explorer's `SHELLDLL_DefView` into our own top-level window. Our window is top-level so
+Chromium composites it, and `DefView` demonstrably still renders, so the icons should draw above our
+content. This is the only remaining route that keeps a WebGL renderer. It temporarily moves a window
+inside Explorer's hierarchy, and icon click and drag handling would need to survive the surface being
+click-through.
 
 **Swap the actual wallpaper image.** Write each frame to disk and call
-`SystemParametersInfo(SPI_SETDESKWALLPAPER)`, or the `IDesktopWallpaper` COM interface. This is
+`SystemParametersInfo(SPI_SETDESKWALLPAPER)`, or use the `IDesktopWallpaper` COM interface. This is
 genuinely the wallpaper, behind icons, by definition. It also writes to the registry and forces a
-shell repaint per frame, so it is only usable at a few frames per second — fine for a slow gradient,
+shell repaint per frame, so it is usable at a few frames per second — fine for a slow gradient,
 useless for a particle simulation.
