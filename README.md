@@ -18,9 +18,16 @@ style can wear any pair of colours.
 | **Aether** | Volumetric liquid mist, thick and thin, flowing between screens |
 | **Lumen** | One smooth organic body with a hard edge, reaching between screens |
 | **Nova** | A dense granular form turning in the dark, over a faint halftone field |
+| **Nova II** | Each form draws out toward the next screen until the two strands meet |
 
-Nova responds to the mouse: each form's rotation eases toward the cursor, the body distorts where the
-cursor rests on it, and the current between screens bows as the cursor crosses the gap.
+Both Nova styles respond to the mouse: each form's rotation eases toward the cursor, and the body
+distorts where the cursor rests on it.
+
+Nova II's connection is not a separate object placed in the gap — it is the bodies themselves. Points
+on the face turned toward the neighbouring screen are drawn out along the line between the two while
+their lateral offset is squeezed toward it, so the strand tapers by construction: thick where it
+leaves the form, thin where the two meet. Switch to it and the screens start unconnected, then reach
+across over about ten seconds.
 
 ## How it works
 
@@ -98,7 +105,7 @@ Settings are written atomically on change and survive an upgrade or reinstall.
 - [x] Live display topology tracking (rotation, offset, add/remove, primary change, DPI)
 - [x] Cross-bezel continuity validation
 - [x] Tray icon and settings window
-- [x] Four visual styles with per-screen colour
+- [x] Five visual styles with per-screen colour
 - [x] Cursor interaction
 - [x] Installer and launch at sign-in
 - [ ] Signed builds

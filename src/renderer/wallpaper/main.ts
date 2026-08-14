@@ -75,9 +75,17 @@ function configFor(settings: Settings): SimConfig {
   };
 }
 
-/** Only these change the size of the particle arrays, so only these need a new world. */
+/**
+ * Only these change the size of the particle arrays, so only these need a new world.
+ *
+ * Nova allocates for the densest setting up front and culls in the shader, so it is exempt from the
+ * density rebuild — which is the difference between a smooth slider and one that stutters the form
+ * and snaps its rotation back to zero on every step.
+ */
 function needsRebuild(a: Settings, b: Settings): boolean {
-  return a.density !== b.density || a.themeId !== b.themeId;
+  if (a.themeId !== b.themeId) return true;
+  const novaLike = b.themeId === "nova" || b.themeId === "nova2";
+  return !novaLike && a.density !== b.density;
 }
 
 class Pane {
@@ -126,7 +134,7 @@ class Pane {
     this.teardownVisuals();
     if (theme.id === "aether") this.buildMist(payload);
     else if (theme.id === "lumen") this.buildLumen(payload);
-    else if (theme.id === "nova") this.buildNova(payload);
+    else if (theme.id === "nova" || theme.id === "nova2") this.buildNova(payload, theme.id);
     else this.buildFilament(payload);
 
     if (first) requestAnimationFrame(this.frame);
@@ -175,25 +183,40 @@ class Pane {
     });
   }
 
-  private buildNova(payload: SurfacePayload): void {
+  /**
+   * Point counts are *not* scaled by density here. The field allocates for the densest setting and
+   * culls to the current one in the shader, so density is a uniform and changing it never rebuilds.
+   */
+  private buildNova(payload: SurfacePayload, themeId: string): void {
     const s = payload.settings;
-    const base = DEFAULT_NOVA_CONFIG;
     this.nova = new NovaField(
       payload.region,
       this.novaBodies(s),
       {
-        ...base,
-        formPoints: Math.max(500, Math.round(base.formPoints * s.density)),
-        ambientPoints: Math.max(50, Math.round(base.ambientPoints * s.density)),
-        radius: base.radius * s.size,
+        ...DEFAULT_NOVA_CONFIG,
+        link: themeId === "nova2" ? "reach" : "none",
+        radius: DEFAULT_NOVA_CONFIG.radius * s.size,
+        density: s.density,
       },
       payload.seed,
       (window.devicePixelRatio || 1) * s.particleScale,
     );
-    this.nova.setBrightness(s.brightness);
-    this.nova.setDrift(s.motion);
+    this.applyNovaSettings(s);
     this.stage!.scene.add(this.nova.grid);
     this.stage!.scene.add(this.nova.points);
+  }
+
+  /** Every Nova setting is a uniform, so this is the whole of applying one — build or live change. */
+  private applyNovaSettings(s: Settings): void {
+    const nova = this.nova;
+    if (!nova) return;
+    nova.setBodies(this.novaBodies(s));
+    nova.setRadius(DEFAULT_NOVA_CONFIG.radius * s.size);
+    nova.setDensity(s.density);
+    nova.setBrightness(s.brightness);
+    nova.setDrift(s.motion);
+    nova.setGrowthSpeed(s.streamSpeed);
+    nova.setPixelScale((window.devicePixelRatio || 1) * s.particleScale);
   }
 
   private bodies(settings: Settings): LumenBody[] {
@@ -277,15 +300,7 @@ class Pane {
     }
 
     if (this.nova) {
-      // Colour and radius are baked into the point buffers, so those need a rebuild; the rest are
-      // uniforms and can change without one.
-      if (previous.size !== next.size || previous.colours.join() !== next.colours.join()) {
-        this.apply({ ...this.payload, settings: next });
-        return;
-      }
-      this.nova.setBrightness(next.brightness);
-      this.nova.setDrift(next.motion);
-      this.nova.setPixelScale((window.devicePixelRatio || 1) * next.particleScale);
+      this.applyNovaSettings(next);
       return;
     }
 

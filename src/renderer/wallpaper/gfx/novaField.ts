@@ -1,6 +1,5 @@
 /**
- * "Nova" — a dense granular form that turns with the cursor, deforms under it, and trails a current
- * of motes to the form on the next screen.
+ * "Nova" — a dense granular form that turns with the cursor and deforms under it.
  *
  * The form is generated rather than loaded from a model. Points are scattered on a sphere, pushed out
  * to a shell, then deformed by low-frequency noise and stretched along a tilted axis. That gives an
@@ -19,8 +18,27 @@
  *   - **Everything is a pure function of the shared clock and the cursor.** No integrated state, so all
  *     panes agree without exchanging anything, and the wallpaper cannot drift however long it runs.
  *
- * All three particle roles live in one buffer and one draw call, told apart by a `kind` attribute:
- * the form, the ambient motes around it, and the current flowing between screens.
+ * # Nothing a setting touches is baked into a buffer
+ *
+ * Shape offsets are stored in units of the body radius, colour is stored as a position along a ramp
+ * rather than as a colour, and the buffers are allocated for the highest density the settings allow.
+ * Size, colour and density are therefore uniforms, and changing one is a handful of float writes
+ * instead of regenerating forty thousand points. That matters more than it sounds: a rebuild both
+ * stalls the frame and resets the rotation to zero, so dragging a slider used to make the form flicker
+ * and snap upright on every step.
+ *
+ * # Reaching between screens (Nova II)
+ *
+ * The connection is not a separate object placed in the gap. It is the bodies themselves: points on
+ * the face turned toward the neighbouring screen are drawn out along the line between the two, while
+ * their lateral offset is squeezed toward that line. The facing test is raised to a high power, so
+ * only the cap actually pointing at the neighbour moves and the rest of the form is untouched.
+ *
+ * The result tapers by construction — the points pulled hardest are also squeezed hardest — so the
+ * strand is thick where it leaves the body and thin where the two meet in the middle, and the join
+ * back into the body is a smooth flare rather than a seam, because the pull falls off continuously
+ * across the cap. Growth is a single scalar: at zero the bodies are ordinary and separate, and as it
+ * rises the two strands extend until they overlap.
  */
 import {
   BufferAttribute,
@@ -34,6 +52,7 @@ import {
   Vector2,
   Vector3,
 } from "three";
+import { SETTING_RANGES } from "@shared/settings";
 import type { Bounds } from "@shared/types";
 import type { Rgb } from "@shared/themes";
 import { createRandom } from "../sim/rng";
@@ -41,9 +60,19 @@ import { createRandom } from "../sim/rng";
 /** Fixed-size arrays are a GLSL requirement; this bounds how many screens can be driven. */
 const MAX_BODIES = 6;
 
+/**
+ * Buffers are allocated for the densest setting and culled down to the current one in the vertex
+ * shader, which is what turns a density change from a rebuild into a single float write. The cost is
+ * vertex invocations for points that are never drawn — cheap, because a culled point produces no
+ * fragments at all, and fragments are what additive point clouds are actually limited by.
+ */
+const DENSITY_HEADROOM = SETTING_RANGES.density.max;
+
 const KIND_FORM = 0;
 const KIND_AMBIENT = 1;
-const KIND_LINK = 2;
+
+/** Seconds for the Nova II strands to grow from separate bodies to a complete connection. */
+const GROW_SECONDS = 13;
 
 const VERTEX_SHADER = /* glsl */ `
 attribute vec3 centre;
@@ -51,28 +80,43 @@ attribute vec3 target;
 attribute vec3 offset;
 attribute float kind;
 attribute float bodyIndex;
-attribute float spin;
 attribute float size;
 attribute float alpha;
 attribute float phase;
-attribute vec3 colour;
+attribute float rank;
+attribute float rampT;
 
 uniform float time;
 uniform float pixelScale;
 uniform float drift;
-uniform float flowSpeed;
+uniform float radius;
+uniform float densityCut;
+uniform float reveal;
 
 uniform float bodyYaw[${MAX_BODIES}];
 uniform float bodyPitch[${MAX_BODIES}];
+uniform vec3 bodyColour[${MAX_BODIES}];
+uniform vec3 bodyAccent[${MAX_BODIES}];
+uniform vec3 bodyBridge[${MAX_BODIES}];
 
 uniform vec2 cursor;
 uniform float cursorActive;
-uniform float hoverRadius;
-uniform float hoverStrength;
-uniform vec3 linkBend;
 
 varying vec3 vColour;
 varying float vAlpha;
+
+/**
+ * How sharply the reach is confined to the facing cap.
+ *
+ * This has to be high. The weight is a cosine raised to this power, so at 5 a point forty-five
+ * degrees off-axis still moves a fifth of the way and the whole body warps into a hook; at 12 the
+ * pull is spent by about thirty degrees and the form keeps its shape with a strand off one side.
+ */
+const float REACH_FOCUS = 12.0;
+/** How far the strand is squeezed toward the axis where the pull is strongest. */
+const float REACH_TAPER = 0.09;
+/** Fraction of the gap each body reaches across. Slightly under half, so the two tips overlap. */
+const float REACH_SPAN = 0.46;
 
 vec3 turn(vec3 p, float yaw, float pitch) {
   float cy = cos(yaw), sy = sin(yaw);
@@ -82,53 +126,95 @@ vec3 turn(vec3 p, float yaw, float pitch) {
   return p;
 }
 
+/**
+ * Ramp between two colours, lifted to white across a narrow band at the midpoint.
+ * Matches the reasoning in the file header: the white hides the grey a straight mix would pass through.
+ */
+vec3 rampColour(vec3 from, vec3 to, float t) {
+  float mid = 1.0 - abs(t * 2.0 - 1.0);
+  float white = mid * mid * mid;
+  vec3 base = mix(from, to, t);
+  return base + (1.0 - base) * white;
+}
+
 void main() {
+  // Density culling first: everything below is wasted work for a point that will not be drawn.
+  if (rank > densityCut) {
+    gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+    gl_PointSize = 0.0;
+    return;
+  }
+
   int bi = int(bodyIndex + 0.5);
   float yaw = 0.0;
   float pitch = 0.0;
+  vec3 cFrom = bodyColour[0];
+  vec3 cTo = bodyAccent[0];
+  vec3 cNear = bodyBridge[0];
   for (int i = 0; i < ${MAX_BODIES}; i++) {
-    if (i == bi) { yaw = bodyYaw[i]; pitch = bodyPitch[i]; }
+    if (i == bi) {
+      yaw = bodyYaw[i];
+      pitch = bodyPitch[i];
+      cFrom = bodyColour[i];
+      cTo = bodyAccent[i];
+      cNear = bodyBridge[i];
+    }
   }
 
-  vec3 base;
-  vec3 local;
-  float fade = 1.0;
+  // Ambient motes hang still in world space while the body turns, so the form reads as rotating
+  // inside a cloud rather than the whole scene spinning.
+  vec3 shape = kind < 0.5 ? turn(offset, yaw, pitch) : offset;
+  float pull = 0.0;
 
-  if (kind < 1.5) {
-    // Form and ambient motes. Ambient carries spin = 0 so it hangs still while the body turns.
-    base = centre;
-    local = mix(offset, turn(offset, yaw, pitch), spin);
-  } else {
-    // The current between screens: a quadratic bezier whose control point is pulled toward the
-    // cursor, so the stream bends as you move across it.
-    float t = fract(time * flowSpeed + phase);
-    vec3 mid = (centre + target) * 0.5 + linkBend;
-    vec3 a = mix(centre, mid, t);
-    vec3 b = mix(mid, target, t);
-    base = mix(a, b, t);
-    // Widest across the middle of the trip, pinched at both ends where it meets a body.
-    local = offset * sin(t * 3.14159);
-    // Fade in and out so motes never pop into or out of existence at the endpoints.
-    fade = smoothstep(0.0, 0.12, t) * smoothstep(1.0, 0.88, t);
+  if (kind < 0.5 && reveal > 0.0) {
+    vec3 toward = target - centre;
+    float span = length(toward);
+    if (span > 0.001) {
+      vec3 axis = toward / span;
+
+      // Only the cap facing the neighbour is affected. The high power is what keeps this a strand
+      // drawn out of one side rather than the whole body drifting across.
+      float facing = clamp(dot(normalize(shape), axis), 0.0, 1.0);
+      pull = pow(facing, REACH_FOCUS) * reveal;
+
+      float along = dot(shape, axis);
+      vec3 lateral = shape - axis * along;
+
+      // Extend along the axis and squeeze across it. Both scale with the same weight, which is what
+      // makes the strand taper on its own instead of needing a separate profile.
+      shape = axis * (along + pull * (span * REACH_SPAN) / radius)
+            + lateral * mix(1.0, REACH_TAPER, pull);
+
+      // A slow sway perpendicular to the axis, so the strand is a curve that breathes rather than a
+      // straight rod. Driven by the shared clock, so every pane places it identically.
+      shape += vec3(-axis.y, axis.x, 0.0) * sin(time * 0.13 + float(bi)) * pull * 0.15;
+    }
   }
 
+  vec3 local = shape * radius;
   local.x += sin(time * 0.6 + phase) * drift;
   local.y += cos(time * 0.5 + phase * 1.3) * drift;
 
-  vec4 world = modelMatrix * vec4(base + local, 1.0);
+  vec4 world = modelMatrix * vec4(centre + local, 1.0);
 
-  // Hover distortion. A gaussian falloff keeps the push smooth right to its edge, where a linear
-  // one would leave a visible ring at the cut-off radius.
+  // Hover distortion. A gaussian falloff keeps the push smooth right to its edge, where a linear one
+  // would leave a visible ring at the cut-off radius.
+  float hoverRadius = radius * 0.9;
   vec2 away = world.xy - cursor;
   float dist = length(away);
-  float bulge = exp(-(dist * dist) / (hoverRadius * hoverRadius)) * hoverStrength * cursorActive;
+  float bulge = exp(-(dist * dist) / (hoverRadius * hoverRadius)) * radius * 0.28 * cursorActive;
   if (dist > 0.001) {
     world.xy += (away / dist) * bulge;
   }
 
   gl_Position = projectionMatrix * viewMatrix * world;
 
-  vColour = colour;
+  // The drawn-out tip takes on the neighbour's colour, so where the two strands overlap they agree
+  // and the join reads as one connection instead of two spikes meeting.
+  vColour = mix(rampColour(cFrom, cTo, rampT), cNear, pull * 0.6);
+
+  // Fade out approaching the density cut so points dissolve as the slider moves rather than popping.
+  float fade = 1.0 - smoothstep(densityCut - 0.05, densityCut, rank);
   // Points lifted by the cursor brighten slightly, which reads as the form responding rather than
   // simply being shoved.
   vAlpha = alpha * fade * (1.0 + bulge / max(hoverRadius, 1.0) * 1.5);
@@ -188,13 +274,17 @@ export type NovaBody = {
   accent: Rgb;
 };
 
+/** How neighbouring screens are joined: not at all, or by each body reaching toward the other. */
+export type NovaLink = "none" | "reach";
+
 export type NovaConfig = {
   formPoints: number;
   ambientPoints: number;
-  /** Motes in each current flowing between a pair of screens. */
-  linkPoints: number;
+  link: NovaLink;
   radius: number;
   ambientSpread: number;
+  /** Starting density multiplier. Set here rather than eased in, so startup shows no growth. */
+  density: number;
 };
 
 export const DEFAULT_NOVA_CONFIG: NovaConfig = {
@@ -202,9 +292,10 @@ export const DEFAULT_NOVA_CONFIG: NovaConfig = {
   // thousand it stops looking like a body and starts looking like scattered debris.
   formPoints: 15000,
   ambientPoints: 1100,
-  linkPoints: 1400,
+  link: "none",
   radius: 300,
   ambientSpread: 2.6,
+  density: 1,
 };
 
 /** Cheap value noise, enough to give the shell its lumps. */
@@ -214,20 +305,11 @@ function wobble(x: number, y: number, z: number): number {
 }
 
 /**
- * Ramp from one colour to the other, lifted to white across a narrow band at the midpoint.
- *
- * A straight interpolation between two colours far apart on the wheel passes through grey. Rather
- * than avoid that, this leans into it: the white highlight is placed exactly where the grey would
- * be, so it is hidden under the brightest part of the form while both ends stay fully saturated.
- * Ramping linearly to white instead washes out most of the body and leaves almost no colour.
+ * The body each one reaches toward: the next screen, or the previous for the last.
+ * With a single display there is no neighbour and nothing reaches anywhere.
  */
-function ramp(from: Rgb, accent: Rgb, t: number, out: [number, number, number]): void {
-  const mid = 1 - Math.abs(t * 2 - 1);
-  const white = mid * mid * mid;
-  for (let i = 0; i < 3; i++) {
-    const base = from[i] + (accent[i] - from[i]) * t;
-    out[i] = base + (1 - base) * white;
-  }
+function neighbourOf(bodies: NovaBody[], index: number): NovaBody | null {
+  return bodies[index + 1] ?? bodies[index - 1] ?? null;
 }
 
 export class NovaField {
@@ -240,14 +322,22 @@ export class NovaField {
   private gridGeometry: PlaneGeometry;
 
   private bodies: NovaBody[];
-  private readonly radius: number;
+  private readonly link: NovaLink;
+
+  /** Eased so a slider drag glides instead of stepping. */
+  private radius: number;
+  private radiusTarget: number;
+  private densityCut: number;
+  private densityTarget: number;
+  private growthSpeed = 1;
 
   /** Smoothed rotation per body, eased toward the cursor-derived target every frame. */
   private readonly yaw: number[] = [];
   private readonly pitch: number[] = [];
   private readonly cursor = new Vector2(0, 0);
   private hasCursor = false;
-  private readonly bend = new Vector3();
+  /** Clock reading when this field first drew, so the strands grow from the moment it appears. */
+  private startedAt: number | null = null;
 
   constructor(
     region: Bounds,
@@ -258,25 +348,29 @@ export class NovaField {
   ) {
     const random = createRandom(seed);
     this.bodies = bodies;
+    this.link = config.link;
     this.radius = config.radius;
+    this.radiusTarget = config.radius;
+    this.densityCut = Math.min(1, Math.max(0, config.density / DENSITY_HEADROOM));
+    this.densityTarget = this.densityCut;
 
-    const bodyCount = Math.max(1, bodies.length);
-    const pairs = Math.max(0, bodies.length - 1);
-    const count = bodyCount * (config.formPoints + config.ambientPoints) + pairs * config.linkPoints;
+    const alloc = (n: number): number => Math.ceil(n * DENSITY_HEADROOM);
+    const formAlloc = alloc(config.formPoints);
+    const ambientAlloc = alloc(config.ambientPoints);
+    const count = Math.max(1, bodies.length) * (formAlloc + ambientAlloc);
 
     const centres = new Float32Array(count * 3);
     const targets = new Float32Array(count * 3);
     const offsets = new Float32Array(count * 3);
-    const colours = new Float32Array(count * 3);
     const kinds = new Float32Array(count);
     const indices = new Float32Array(count);
-    const spins = new Float32Array(count);
     const sizes = new Float32Array(count);
     const alphas = new Float32Array(count);
     const phases = new Float32Array(count);
+    const ranks = new Float32Array(count);
+    const rampTs = new Float32Array(count);
 
     const dir: [number, number, number] = [0, 0, 0];
-    const rgb: [number, number, number] = [0, 0, 0];
     // Fixed tilt so the form sits on a diagonal rather than square to the screen.
     const tilt = -0.58;
     const cosT = Math.cos(tilt);
@@ -285,17 +379,18 @@ export class NovaField {
     let i = 0;
     for (let b = 0; b < bodies.length; b++) {
       const body = bodies[b];
+      const neighbour = neighbourOf(bodies, b);
       this.yaw.push(0);
       this.pitch.push(0);
 
-      for (let n = 0; n < config.formPoints; n++, i++) {
+      for (let n = 0; n < formAlloc; n++, i++) {
         random.onSphere(dir);
 
         // Most points land in a tight shell; a few stray outward so the silhouette has some fray.
         const stray = random.next();
         const shell = stray > 0.97 ? 1 + random.next() * 0.5 : 0.93 + Math.pow(random.next(), 0.5) * 0.07;
         const lumps = 1 + wobble(dir[0] * 1.6, dir[1] * 1.6, dir[2] * 1.6) * 0.22;
-        const r = config.radius * shell * lumps;
+        const r = shell * lumps;
 
         // Stretched along Y and slimmed across, then tilted, to make an elongated pod. The ratio has
         // to be well past what looks right in the numbers: rotation foreshortens the long axis for
@@ -311,75 +406,44 @@ export class NovaField {
         const i3 = i * 3;
         centres[i3] = body.x;
         centres[i3 + 1] = body.y;
+        if (neighbour) {
+          targets[i3] = neighbour.x;
+          targets[i3 + 1] = neighbour.y;
+        } else {
+          // No neighbour: point the axis at itself so `span` is zero and the reach is skipped.
+          targets[i3] = body.x;
+          targets[i3 + 1] = body.y;
+        }
+        // Stored in units of the body radius, so radius stays a uniform.
         offsets[i3] = px;
         offsets[i3 + 1] = py;
         offsets[i3 + 2] = pz;
 
-        ramp(body.colour, body.accent, Math.min(1, Math.max(0, (py / (config.radius * 1.5)) * 0.5 + 0.5)), rgb);
-        colours[i3] = rgb[0];
-        colours[i3 + 1] = rgb[1];
-        colours[i3 + 2] = rgb[2];
-
+        rampTs[i] = Math.min(1, Math.max(0, (py / 1.5) * 0.5 + 0.5));
         kinds[i] = KIND_FORM;
         indices[i] = b;
-        spins[i] = 1;
         sizes[i] = random.range(1.1, 4.2);
         alphas[i] = random.range(0.45, 1);
         phases[i] = random.range(0, Math.PI * 2);
+        ranks[i] = n / formAlloc;
       }
 
-      for (let n = 0; n < config.ambientPoints; n++, i++) {
+      for (let n = 0; n < ambientAlloc; n++, i++) {
         const i3 = i * 3;
-        const spread = config.radius * config.ambientSpread;
+        const spread = config.ambientSpread;
         centres[i3] = body.x;
         centres[i3 + 1] = body.y;
         offsets[i3] = random.range(-spread, spread);
         offsets[i3 + 1] = random.range(-spread, spread);
         offsets[i3 + 2] = random.range(-spread * 0.3, spread * 0.3);
 
-        ramp(body.colour, body.accent, random.next(), rgb);
-        colours[i3] = rgb[0];
-        colours[i3 + 1] = rgb[1];
-        colours[i3 + 2] = rgb[2];
-
+        rampTs[i] = random.next();
         kinds[i] = KIND_AMBIENT;
         indices[i] = b;
-        spins[i] = 0;
         sizes[i] = random.range(0.9, 2.4);
         alphas[i] = random.range(0.15, 0.55);
         phases[i] = random.range(0, Math.PI * 2);
-      }
-    }
-
-    // The current between neighbouring screens.
-    for (let b = 0; b + 1 < bodies.length; b++) {
-      const from = bodies[b];
-      const to = bodies[b + 1];
-      for (let n = 0; n < config.linkPoints; n++, i++) {
-        const i3 = i * 3;
-        centres[i3] = from.x;
-        centres[i3 + 1] = from.y;
-        targets[i3] = to.x;
-        targets[i3 + 1] = to.y;
-
-        const spread = config.radius * 0.5;
-        offsets[i3] = random.range(-spread, spread) * 0.35;
-        offsets[i3 + 1] = random.range(-spread, spread);
-        offsets[i3 + 2] = random.range(-spread, spread) * 0.5;
-
-        // Coloured along the trip, so the stream reads as one body's material arriving at the other.
-        ramp(from.colour, to.colour, random.next(), rgb);
-        colours[i3] = rgb[0];
-        colours[i3 + 1] = rgb[1];
-        colours[i3 + 2] = rgb[2];
-
-        kinds[i] = KIND_LINK;
-        indices[i] = b;
-        spins[i] = 0;
-        sizes[i] = random.range(0.9, 2.8);
-        alphas[i] = random.range(0.3, 0.85);
-        // Phases spread evenly so the current is continuous rather than arriving in pulses.
-        phases[i] = random.next();
+        ranks[i] = n / ambientAlloc;
       }
     }
 
@@ -388,13 +452,13 @@ export class NovaField {
     this.geometry.setAttribute("centre", new BufferAttribute(centres, 3));
     this.geometry.setAttribute("target", new BufferAttribute(targets, 3));
     this.geometry.setAttribute("offset", new BufferAttribute(offsets, 3));
-    this.geometry.setAttribute("colour", new BufferAttribute(colours, 3));
     this.geometry.setAttribute("kind", new BufferAttribute(kinds, 1));
     this.geometry.setAttribute("bodyIndex", new BufferAttribute(indices, 1));
-    this.geometry.setAttribute("spin", new BufferAttribute(spins, 1));
     this.geometry.setAttribute("size", new BufferAttribute(sizes, 1));
     this.geometry.setAttribute("alpha", new BufferAttribute(alphas, 1));
     this.geometry.setAttribute("phase", new BufferAttribute(phases, 1));
+    this.geometry.setAttribute("rank", new BufferAttribute(ranks, 1));
+    this.geometry.setAttribute("rampT", new BufferAttribute(rampTs, 1));
 
     this.material = new ShaderMaterial({
       vertexShader: VERTEX_SHADER,
@@ -404,14 +468,16 @@ export class NovaField {
         pixelScale: { value: pixelScale },
         brightness: { value: 1 },
         drift: { value: 6 },
-        flowSpeed: { value: 0.06 },
+        radius: { value: this.radius },
+        densityCut: { value: this.densityCut },
+        reveal: { value: 0 },
         bodyYaw: { value: new Array(MAX_BODIES).fill(0) },
         bodyPitch: { value: new Array(MAX_BODIES).fill(0) },
+        bodyColour: { value: Array.from({ length: MAX_BODIES }, () => new Vector3()) },
+        bodyAccent: { value: Array.from({ length: MAX_BODIES }, () => new Vector3()) },
+        bodyBridge: { value: Array.from({ length: MAX_BODIES }, () => new Vector3()) },
         cursor: { value: new Vector2(0, 0) },
         cursorActive: { value: 0 },
-        hoverRadius: { value: config.radius * 0.9 },
-        hoverStrength: { value: config.radius * 0.28 },
-        linkBend: { value: new Vector3() },
       },
       // Premultiplied additive, matching the transparent panes.
       blending: CustomBlending,
@@ -423,6 +489,7 @@ export class NovaField {
       depthTest: false,
       transparent: true,
     });
+    this.setBodies(bodies);
 
     this.points = new Points(this.geometry, this.material);
     // The cloud spans the whole virtual desktop while each pane shows one slice, so a single bounds
@@ -461,6 +528,30 @@ export class NovaField {
     this.grid.position.set(region.x + region.width / 2, -(region.y + region.height / 2), 0);
   }
 
+  /**
+   * Update colours without touching the buffers.
+   *
+   * Positions are not read from here — those are baked, and a layout change rebuilds the field — but
+   * a colour change is only these three uniform arrays.
+   */
+  setBodies(bodies: NovaBody[]): void {
+    this.bodies = bodies;
+    const uniforms = this.material.uniforms;
+    const colour = uniforms["bodyColour"].value as Vector3[];
+    const accent = uniforms["bodyAccent"].value as Vector3[];
+    const bridge = uniforms["bodyBridge"].value as Vector3[];
+
+    for (let b = 0; b < MAX_BODIES; b++) {
+      const body = bodies[Math.min(b, bodies.length - 1)];
+      if (!body) continue;
+      colour[b].set(body.colour[0], body.colour[1], body.colour[2]);
+      accent[b].set(body.accent[0], body.accent[1], body.accent[2]);
+      // The colour the strand leaving body b is heading toward, so the two tips agree where they meet.
+      const near = neighbourOf(bodies, Math.min(b, bodies.length - 1)) ?? body;
+      bridge[b].set(near.colour[0], near.colour[1], near.colour[2]);
+    }
+  }
+
   /** Cursor in world units. Pass null when its position is unknown. */
   setCursor(position: { x: number; y: number } | null): void {
     if (!position) {
@@ -483,8 +574,19 @@ export class NovaField {
     this.material.uniforms["drift"].value = 6 * drift;
   }
 
-  setFlowSpeed(speed: number): void {
-    this.material.uniforms["flowSpeed"].value = 0.06 * speed;
+  /** Scales how quickly the strands reach across. No effect when there is nothing to connect. */
+  setGrowthSpeed(speed: number): void {
+    this.growthSpeed = Math.max(0.05, speed);
+  }
+
+  /** Body radius in world units. Eased in `update`, so this may be called on every slider step. */
+  setRadius(radius: number): void {
+    this.radiusTarget = radius;
+  }
+
+  /** Density as a multiplier of the tuned default. Eased, and clamped to the allocated headroom. */
+  setDensity(density: number): void {
+    this.densityTarget = Math.min(1, Math.max(0, density / DENSITY_HEADROOM));
   }
 
   /**
@@ -499,6 +601,25 @@ export class NovaField {
     uniforms["time"].value = seconds;
 
     const ease = Math.min(1, delta * 3.5);
+    const settle = Math.min(1, delta * 4);
+
+    // Settings are eased rather than applied outright, so dragging a slider glides through the
+    // change instead of stepping through it.
+    this.radius += (this.radiusTarget - this.radius) * settle;
+    this.densityCut += (this.densityTarget - this.densityCut) * settle;
+    uniforms["radius"].value = this.radius;
+    uniforms["densityCut"].value = this.densityCut;
+
+    if (this.link === "reach") {
+      // Measured from the field's first frame, not from the shared epoch, so the bodies are always
+      // separate at the moment the style is switched on. Panes rebuild together, so they agree.
+      if (this.startedAt === null) this.startedAt = seconds;
+      const age = ((seconds - this.startedAt) * this.growthSpeed) / GROW_SECONDS;
+      const t = Math.min(1, Math.max(0, age));
+      // Smootherstep: arrives and leaves without a visible kick at either end of the growth.
+      uniforms["reveal"].value = t * t * t * (t * (t * 6 - 15) + 10);
+    }
+
     const yawArray = uniforms["bodyYaw"].value as number[];
     const pitchArray = uniforms["bodyPitch"].value as number[];
 
@@ -530,20 +651,6 @@ export class NovaField {
     (uniforms["cursor"].value as Vector2).copy(this.cursor);
     const active = uniforms["cursorActive"] as { value: number };
     active.value += ((this.hasCursor ? 1 : 0) - active.value) * ease;
-
-    // The current bows toward the cursor. Eased for the same reason as the rotation, and scaled down
-    // so it bends rather than snapping onto the pointer.
-    if (this.bodies.length > 1) {
-      const a = this.bodies[0];
-      const b = this.bodies[1];
-      const midX = (a.x + b.x) / 2;
-      const midY = (a.y + b.y) / 2;
-      const targetX = this.hasCursor ? (this.cursor.x - midX) * 0.35 : 0;
-      const targetY = this.hasCursor ? (this.cursor.y - midY) * 0.35 : 0;
-      this.bend.x += (targetX - this.bend.x) * Math.min(1, delta * 1.6);
-      this.bend.y += (targetY - this.bend.y) * Math.min(1, delta * 1.6);
-      (uniforms["linkBend"].value as Vector3).copy(this.bend);
-    }
   }
 
   dispose(): void {
