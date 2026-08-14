@@ -71,12 +71,14 @@ if (!app.requestSingleInstanceLock()) {
     // Render each pane offscreen to a PNG. Chromium renders these regardless of what covers the
     // desktop, so the wallpaper can be inspected without minimising the user's windows.
     if (process.env["DW_CAPTURE"] === "1") {
+      // Styles that build up over time need a later shot than one that is settled immediately.
+      const delay = Number(process.env["DW_CAPTURE_DELAY"] ?? 4000) || 4000;
       setTimeout(() => {
         void surface
           ?.capture(app.getPath("userData"))
           .then((files) => files.forEach((f) => console.log(`captured ${f}`)))
           .catch((error) => console.error("capture failed", error));
-      }, 4000);
+      }, delay);
     }
   });
 }

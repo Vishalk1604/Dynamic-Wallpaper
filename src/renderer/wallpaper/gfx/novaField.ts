@@ -70,9 +70,15 @@ const DENSITY_HEADROOM = SETTING_RANGES.density.max;
 
 const KIND_FORM = 0;
 const KIND_AMBIENT = 1;
+const KIND_STRAND = 2;
 
-/** Seconds for the Nova II strands to grow from separate bodies to a complete connection. */
-const GROW_SECONDS = 13;
+/**
+ * Seconds for the Nova II strands to grow from separate bodies to a complete connection.
+ *
+ * Deliberately long. The reach is meant to read as the two being drawn toward each other, and at
+ * anything brisk it looks like an effect switching on. Scaled by the flow-speed setting.
+ */
+const GROW_SECONDS = 50;
 
 const VERTEX_SHADER = /* glsl */ `
 attribute vec3 centre;
@@ -106,17 +112,24 @@ varying vec3 vColour;
 varying float vAlpha;
 
 /**
- * How sharply the reach is confined to the facing cap.
- *
- * This has to be high. The weight is a cosine raised to this power, so at 5 a point forty-five
- * degrees off-axis still moves a fifth of the way and the whole body warps into a hook; at 12 the
- * pull is spent by about thirty degrees and the form keeps its shape with a strand off one side.
+ * How much of the body is drawn out: only points whose facing exceeds this, roughly a forty-degree
+ * cap pointed at the neighbour. Below it a point does not move at all.
  */
-const float REACH_FOCUS = 12.0;
-/** How far the strand is squeezed toward the axis where the pull is strongest. */
-const float REACH_TAPER = 0.09;
-/** Fraction of the gap each body reaches across. Slightly under half, so the two tips overlap. */
-const float REACH_SPAN = 0.46;
+const float REACH_START = 0.66;
+/** How far that cap leans toward the neighbour, in radius units. Enough to lean, not to migrate. */
+const float REACH_BULGE = 0.34;
+/** Mild lateral squeeze on the lean, so the body ends in a teardrop rather than a blunt cap. */
+const float REACH_SQUEEZE = 0.78;
+
+/** Where the strand begins, in radius units along the axis — inside the body, so it has no visible start. */
+const float STRAND_ROOT = 0.12;
+/** Strand radius at the root and through the middle, as fractions of the body radius. */
+const float STRAND_ROOT_W = 0.40;
+const float STRAND_TIP_W = 0.27;
+/** How far past the midpoint the tip goes, so the two interpenetrate instead of stopping short. */
+const float STRAND_OVERLAP = 0.08;
+/** Amplitude of the slow arc, in radius units. */
+const float STRAND_ARC = 0.25;
 
 vec3 turn(vec3 p, float yaw, float pitch) {
   float cy = cos(yaw), sy = sin(yaw);
@@ -161,35 +174,61 @@ void main() {
     }
   }
 
-  // Ambient motes hang still in world space while the body turns, so the form reads as rotating
-  // inside a cloud rather than the whole scene spinning.
-  vec3 shape = kind < 0.5 ? turn(offset, yaw, pitch) : offset;
-  float pull = 0.0;
+  vec3 toward = target - centre;
+  float span = length(toward);
+  vec3 axis = span > 0.001 ? toward / span : vec3(1.0, 0.0, 0.0);
 
-  if (kind < 0.5 && reveal > 0.0) {
-    vec3 toward = target - centre;
-    float span = length(toward);
-    if (span > 0.001) {
-      vec3 axis = toward / span;
+  vec3 shape;
+  // How far along the connection this point sits: 0 at the body, 1 at the join. Drives the colour
+  // blend for both the leaning cap and the strand.
+  float reach = 0.0;
+  float grow = 1.0;
 
-      // Only the cap facing the neighbour is affected. The high power is what keeps this a strand
-      // drawn out of one side rather than the whole body drifting across.
+  if (kind < 1.5) {
+    // Ambient motes hang still in world space while the body turns, so the form reads as rotating
+    // inside a cloud rather than the whole scene spinning.
+    shape = kind < 0.5 ? turn(offset, yaw, pitch) : offset;
+
+    if (kind < 0.5 && reveal > 0.0 && span > 0.001) {
       float facing = clamp(dot(normalize(shape), axis), 0.0, 1.0);
-      pull = pow(facing, REACH_FOCUS) * reveal;
+
+      // The body leans toward its neighbour. This is deliberately a short lean and not the
+      // connection itself: stretching the body's own points the whole way thinned the form out
+      // exactly where the two were supposed to meet, because the same points had to cover several
+      // times the distance. The strand below carries the connection on points of its own, and this
+      // only pulls the silhouette into a teardrop so the two read as one piece.
+      reach = clamp((facing - REACH_START) / (1.0 - REACH_START), 0.0, 1.0) * reveal;
 
       float along = dot(shape, axis);
       vec3 lateral = shape - axis * along;
-
-      // Extend along the axis and squeeze across it. Both scale with the same weight, which is what
-      // makes the strand taper on its own instead of needing a separate profile.
-      shape = axis * (along + pull * (span * REACH_SPAN) / radius)
-            + lateral * mix(1.0, REACH_TAPER, pull);
-
-      // A slow sway perpendicular to the axis, so the strand is a curve that breathes rather than a
-      // straight rod. Driven by the shared clock, so every pane places it identically.
-      shape += vec3(-axis.y, axis.x, 0.0) * sin(time * 0.13 + float(bi)) * pull * 0.15;
+      shape = axis * (along + reach * REACH_BULGE) + lateral * mix(1.0, REACH_SQUEEZE, reach);
     }
+  } else {
+    float u = offset.x;
+    reach = u;
+
+    // Rooted inside the body, so it has no visible start, and ending on the midpoint between the
+    // two, so both strands finish in the same place.
+    float along = mix(STRAND_ROOT, (span * 0.5) / radius + STRAND_OVERLAP, u);
+    // Widest at the root where it is buried in the body, easing to a width it then holds all the
+    // way to the join. A profile that keeps pinching leaves the middle a thread.
+    float width = mix(STRAND_ROOT_W, STRAND_TIP_W, smoothstep(0.0, 0.5, u));
+
+    vec3 side = normalize(vec3(-axis.y, axis.x, 0.0));
+    shape = axis * along + (side * offset.y + cross(axis, side) * offset.z) * width;
+
+    // Reaches outward as it grows, rather than fading up along its whole length at once.
+    float front = reveal * 1.12;
+    grow = 1.0 - smoothstep(front - 0.09, front, u);
   }
+
+  // A slow arc, so the connection is a curve rather than a straight rod.
+  //
+  // It has to be along a world axis with no per-body phase. The two bodies face opposite ways, so
+  // anything expressed relative to their own axis displaces the two tips in opposite directions and
+  // pulls the join apart. The quarter-turn sine flattens it to zero slope at the tip, so the two
+  // arcs meet smoothly instead of meeting at a peak.
+  shape.y += sin(time * 0.13) * sin(reach * 1.5708) * STRAND_ARC;
 
   vec3 local = shape * radius;
   local.x += sin(time * 0.6 + phase) * drift;
@@ -209,12 +248,17 @@ void main() {
 
   gl_Position = projectionMatrix * viewMatrix * world;
 
-  // The drawn-out tip takes on the neighbour's colour, so where the two strands overlap they agree
-  // and the join reads as one connection instead of two spikes meeting.
-  vColour = mix(rampColour(cFrom, cTo, rampT), cNear, pull * 0.6);
+  // The join is a single colour arrived at from both sides.
+  //
+  // An even mix of the two body colours is symmetric, so each strand reaches the meeting point at
+  // exactly the same value and the connection reads as one object rather than two tips touching.
+  // Lifted toward white because a straight mix of two distant hues lands on mud.
+  vec3 joined = mix(cFrom, cNear, 0.5);
+  joined += (1.0 - joined) * 0.45;
+  vColour = mix(rampColour(cFrom, cTo, rampT), joined, reach);
 
   // Fade out approaching the density cut so points dissolve as the slider moves rather than popping.
-  float fade = 1.0 - smoothstep(densityCut - 0.05, densityCut, rank);
+  float fade = grow * (1.0 - smoothstep(densityCut - 0.05, densityCut, rank));
   // Points lifted by the cursor brighten slightly, which reads as the form responding rather than
   // simply being shoved.
   vAlpha = alpha * fade * (1.0 + bulge / max(hoverRadius, 1.0) * 1.5);
@@ -280,6 +324,8 @@ export type NovaLink = "none" | "reach";
 export type NovaConfig = {
   formPoints: number;
   ambientPoints: number;
+  /** Points making up each body's half of the connection, when `link` is `reach`. */
+  strandPoints: number;
   link: NovaLink;
   radius: number;
   ambientSpread: number;
@@ -291,6 +337,9 @@ export const DEFAULT_NOVA_CONFIG: NovaConfig = {
   // Dense on purpose. The form is read entirely from the accumulation of dots, so below roughly ten
   // thousand it stops looking like a body and starts looking like scattered debris.
   formPoints: 15000,
+  // The connection covers roughly as much ground as a body but at a fraction of the width, so it
+  // needs a count of its own rather than a share of the body's.
+  strandPoints: 9000,
   ambientPoints: 1100,
   link: "none",
   radius: 300,
@@ -357,7 +406,9 @@ export class NovaField {
     const alloc = (n: number): number => Math.ceil(n * DENSITY_HEADROOM);
     const formAlloc = alloc(config.formPoints);
     const ambientAlloc = alloc(config.ambientPoints);
-    const count = Math.max(1, bodies.length) * (formAlloc + ambientAlloc);
+    // A strand only exists where there is a neighbour to reach for.
+    const strandAlloc = config.link === "reach" && bodies.length > 1 ? alloc(config.strandPoints) : 0;
+    const count = Math.max(1, bodies.length) * (formAlloc + ambientAlloc + strandAlloc);
 
     const centres = new Float32Array(count * 3);
     const targets = new Float32Array(count * 3);
@@ -444,6 +495,32 @@ export class NovaField {
         alphas[i] = random.range(0.15, 0.55);
         phases[i] = random.range(0, Math.PI * 2);
         ranks[i] = n / ambientAlloc;
+      }
+
+      for (let n = 0; n < strandAlloc; n++, i++) {
+        const i3 = i * 3;
+        centres[i3] = body.x;
+        centres[i3 + 1] = body.y;
+        targets[i3] = neighbour ? neighbour.x : body.x;
+        targets[i3 + 1] = neighbour ? neighbour.y : body.y;
+
+        const theta = random.next() * Math.PI * 2;
+        // Slightly inside a uniform area fill, which would be `0.5`. Leaning below it puts more
+        // points near the axis, giving the connection a brighter core instead of reading as a hollow
+        // pipe seen edge on.
+        const radial = Math.pow(random.next(), 0.42);
+
+        offsets[i3] = random.next();
+        offsets[i3 + 1] = Math.cos(theta) * radial;
+        offsets[i3 + 2] = Math.sin(theta) * radial;
+
+        rampTs[i] = random.next();
+        kinds[i] = KIND_STRAND;
+        indices[i] = b;
+        sizes[i] = random.range(0.9, 3);
+        alphas[i] = random.range(0.32, 0.95);
+        phases[i] = random.range(0, Math.PI * 2);
+        ranks[i] = n / strandAlloc;
       }
     }
 
@@ -616,8 +693,11 @@ export class NovaField {
       if (this.startedAt === null) this.startedAt = seconds;
       const age = ((seconds - this.startedAt) * this.growthSpeed) / GROW_SECONDS;
       const t = Math.min(1, Math.max(0, age));
-      // Smootherstep: arrives and leaves without a visible kick at either end of the growth.
-      uniforms["reveal"].value = t * t * t * (t * (t * 6 - 15) + 10);
+      // Smoothstep raised to bias the curve late. It creeps at the start and gathers pace as the
+      // strands close, which reads as being drawn in rather than as a value being animated up, and
+      // the power keeps the zero slope at both ends so nothing kicks at the start or the contact.
+      const smooth = t * t * (3 - 2 * t);
+      uniforms["reveal"].value = Math.pow(smooth, 1.9);
     }
 
     const yawArray = uniforms["bodyYaw"].value as number[];
