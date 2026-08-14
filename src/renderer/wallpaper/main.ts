@@ -14,6 +14,7 @@ import type { DisplayInfo, SurfacePayload } from "@shared/types";
 import { BlobPoints } from "./gfx/blobPoints";
 import { LumenField, type LumenBody } from "./gfx/lumenField";
 import { MistField, type MistWell } from "./gfx/mistField";
+import { DEFAULT_NOVA_CONFIG, NovaField, type NovaBody } from "./gfx/novaField";
 import { Stage } from "./gfx/stage";
 import { BlobWorld, DEFAULT_SIM_CONFIG, type SimConfig, type Well } from "./sim/world";
 
@@ -83,6 +84,7 @@ class Pane {
   private points: BlobPoints | null = null;
   private mist: MistField | null = null;
   private lumen: LumenField | null = null;
+  private nova: NovaField | null = null;
   private stage: Stage | null = null;
   private payload: SurfacePayload | null = null;
   private settings: Settings | null = null;
@@ -112,6 +114,7 @@ class Pane {
     this.teardownVisuals();
     if (theme.id === "aether") this.buildMist(payload);
     else if (theme.id === "lumen") this.buildLumen(payload);
+    else if (theme.id === "nova") this.buildNova(payload);
     else this.buildFilament(payload);
 
     if (first) requestAnimationFrame(this.frame);
@@ -135,6 +138,50 @@ class Pane {
       this.lumen.dispose();
       this.lumen = null;
     }
+    if (this.nova) {
+      this.stage.scene.remove(this.nova.points);
+      this.stage.scene.remove(this.nova.grid);
+      this.nova.dispose();
+      this.nova = null;
+    }
+  }
+
+  /**
+   * Each body's gradient runs toward its neighbour's colour, so the two screens read as related
+   * rather than as two unrelated objects that happen to be on screen at once.
+   */
+  private novaBodies(settings: Settings): NovaBody[] {
+    const displays = this.payload?.layout.displays ?? [];
+    return displays.map((d, i) => {
+      const b = d.bounds;
+      return {
+        x: b.x + b.width / 2,
+        y: -(b.y + b.height / 2),
+        colour: colourFor(settings, i),
+        accent: colourFor(settings, displays.length > 1 ? (i + 1) % displays.length : i + 1),
+      };
+    });
+  }
+
+  private buildNova(payload: SurfacePayload): void {
+    const s = payload.settings;
+    const base = DEFAULT_NOVA_CONFIG;
+    this.nova = new NovaField(
+      payload.region,
+      this.novaBodies(s),
+      {
+        ...base,
+        formPoints: Math.max(500, Math.round(base.formPoints * s.density)),
+        ambientPoints: Math.max(50, Math.round(base.ambientPoints * s.density)),
+        radius: base.radius * s.size,
+      },
+      payload.seed,
+      (window.devicePixelRatio || 1) * s.particleScale,
+    );
+    this.nova.setBrightness(s.brightness);
+    this.nova.setDrift(s.motion);
+    this.stage!.scene.add(this.nova.grid);
+    this.stage!.scene.add(this.nova.points);
   }
 
   private bodies(settings: Settings): LumenBody[] {
@@ -217,6 +264,19 @@ class Pane {
       return;
     }
 
+    if (this.nova) {
+      // Colour and radius are baked into the point buffers, so those need a rebuild; the rest are
+      // uniforms and can change without one.
+      if (previous.size !== next.size || previous.colours.join() !== next.colours.join()) {
+        this.apply({ ...this.payload, settings: next });
+        return;
+      }
+      this.nova.setBrightness(next.brightness);
+      this.nova.setDrift(next.motion);
+      this.nova.setPixelScale((window.devicePixelRatio || 1) * next.particleScale);
+      return;
+    }
+
     const wells = this.payload.layout.displays.map((d, i) => wellFor(d, i, next));
     this.world?.retune(configFor(next), wells);
     // Colours live in the particle buffers, so they have to be re-applied explicitly — without this
@@ -239,6 +299,8 @@ class Pane {
       this.mist.setTime(elapsed * settings.motion);
     } else if (this.lumen) {
       this.lumen.update(elapsed * settings.motion);
+    } else if (this.nova) {
+      this.nova.update(elapsed * settings.streamSpeed);
     } else if (this.world && this.points) {
       this.world.advanceTo(Math.floor(elapsed / DEFAULT_SIM_CONFIG.timeStep));
       this.points.sync();
@@ -263,7 +325,9 @@ class Pane {
       ? `${this.world.count} particles`
       : this.lumen
         ? "metaball field"
-        : "volumetric mist";
+        : this.nova
+          ? "granular form"
+          : "volumetric mist";
     hud.textContent =
       `${theme.name}  |  ${r.width}x${r.height} @${r.x},${r.y}  |  ` +
       `${detail}  |  ${this.fps.toFixed(0)} fps  |  ${this.stage?.info ?? ""}`;
