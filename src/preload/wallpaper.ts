@@ -7,4 +7,7 @@ contextBridge.exposeInMainWorld("wallpaper", {
   onSettings: (callback: (settings: unknown) => void) => {
     ipcRenderer.on("wallpaper:settings", (_event, settings) => callback(settings));
   },
+  onPointer: (callback: (position: unknown) => void) => {
+    ipcRenderer.on("wallpaper:pointer", (_event, position) => callback(position));
+  },
 });

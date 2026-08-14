@@ -21,6 +21,7 @@ import { BlobWorld, DEFAULT_SIM_CONFIG, type SimConfig, type Well } from "./sim/
 type WallpaperBridge = {
   onLayout: (callback: (payload: SurfacePayload) => void) => void;
   onSettings: (callback: (settings: Settings) => void) => void;
+  onPointer: (callback: (position: { x: number; y: number }) => void) => void;
 };
 
 const bridge = (globalThis as unknown as { wallpaper: WallpaperBridge }).wallpaper;
@@ -92,6 +93,17 @@ class Pane {
   private frames = 0;
   private lastHudAt = 0;
   private fps = 0;
+  private lastFrameAt = 0;
+  /** Cursor in world units, or null before the first sample arrives. */
+  private cursor: { x: number; y: number } | null = null;
+
+  /**
+   * Cursor position arrives in virtual-desktop physical pixels, which is world space except that
+   * screen Y runs downward and world Y runs up.
+   */
+  setPointer(position: { x: number; y: number }): void {
+    this.cursor = { x: position.x, y: -position.y };
+  }
 
   apply(payload: SurfacePayload): void {
     const first = this.payload === null;
@@ -300,7 +312,11 @@ class Pane {
     } else if (this.lumen) {
       this.lumen.update(elapsed * settings.motion);
     } else if (this.nova) {
-      this.nova.update(elapsed * settings.streamSpeed);
+      // Real frame delta, not the shared clock: the easing toward the cursor has to run at the pace
+      // this pane is actually drawing, or it settles at a different rate on a slower display.
+      const delta = this.lastFrameAt ? Math.min(0.1, (now - this.lastFrameAt) / 1000) : 0.016;
+      this.nova.setCursor(this.cursor);
+      this.nova.update(elapsed, delta);
     } else if (this.world && this.points) {
       this.world.advanceTo(Math.floor(elapsed / DEFAULT_SIM_CONFIG.timeStep));
       this.points.sync();
@@ -308,6 +324,7 @@ class Pane {
 
     stage.render();
 
+    this.lastFrameAt = now;
     this.frames += 1;
     if (now - this.lastHudAt > 1000) {
       this.fps = (this.frames * 1000) / (now - this.lastHudAt);
@@ -337,3 +354,4 @@ class Pane {
 const pane = new Pane();
 bridge.onLayout((payload) => pane.apply(payload));
 bridge.onSettings((settings) => pane.applySettings(settings));
+bridge.onPointer((position) => pane.setPointer(position));

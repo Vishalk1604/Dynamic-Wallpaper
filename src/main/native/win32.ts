@@ -24,6 +24,25 @@ export const FindWindowExW = user32.func("__stdcall", "FindWindowExW", "uintptr_
   "str16", // lpszWindow
 ]);
 
+const POINT = koffi.struct("POINT", { x: "int32", y: "int32" });
+
+const GetCursorPosNative = user32.func("__stdcall", "GetCursorPos", "bool", [
+  koffi.out(koffi.pointer(POINT)),
+]);
+
+/**
+ * Cursor position in virtual-desktop physical pixels — the same space the wallpaper's world
+ * coordinates use, so it needs no conversion beyond negating Y.
+ *
+ * Read from the OS rather than from mouse events, because the panes are click-through: they are
+ * skipped by hit-testing entirely so that clicks reach the desktop, which also means they never
+ * receive a mouse event. Polling observes the cursor without capturing it.
+ */
+export function getCursorPos(): { x: number; y: number } | null {
+  const point = { x: 0, y: 0 };
+  return GetCursorPosNative(point) ? point : null;
+}
+
 export const SendMessageW = user32.func("__stdcall", "SendMessageW", "intptr_t", [
   "uintptr_t", // hWnd
   "uint", // Msg

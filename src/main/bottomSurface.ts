@@ -28,6 +28,7 @@ import { join } from "node:path";
 import type { SurfacePayload } from "@shared/types";
 import type { Bounds, DisplayInfo, Layout } from "./displays";
 import { IconHost } from "./iconHost";
+import { PointerTracker } from "./pointer";
 import type { SettingsStore } from "./settingsStore";
 import {
   HWND_BOTTOM,
@@ -69,6 +70,7 @@ export class BottomSurface {
   private disposed = false;
   private paused = false;
   private readonly iconHost = new IconHost();
+  private readonly pointer = new PointerTracker();
 
   /**
    * Shared across every pane, and deliberately fixed for the process lifetime: the panes each run
@@ -126,6 +128,9 @@ export class BottomSurface {
         this.iconHost.adopt(primary.hwnd, primary.region, layout.virtualBounds);
       }
     }
+
+    this.pointer.setTargets(this.panes.map((p) => p.window));
+    this.pointer.start();
 
     this.startSink();
     this.setPaused(this.settings.value.paused);
@@ -323,6 +328,7 @@ export class BottomSurface {
 
   dispose(): void {
     this.disposed = true;
+    this.pointer.stop();
     if (this.sink) clearInterval(this.sink);
     this.sink = null;
     // Order matters: hand the icons back before the pane that owns them is destroyed.
