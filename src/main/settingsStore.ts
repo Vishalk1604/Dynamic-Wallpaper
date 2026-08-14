@@ -13,6 +13,18 @@ import { DEFAULT_SETTINGS, normaliseSettings, type Settings } from "@shared/sett
 
 type Listener = (settings: Settings) => void;
 
+/**
+ * Registry value name under `HKCU\...\CurrentVersion\Run`.
+ *
+ * Named explicitly rather than left to default, because Electron derives the default from the
+ * AppUserModelId and the uninstaller has to delete this exact value — a startup entry pointing at a
+ * removed executable is the classic uninstall leftover. Kept in step with `build-resources/installer.nsh`.
+ */
+const AUTO_START_KEY = "Dynamic Wallpaper";
+
+/** Marks a sign-in launch, so the settings window does not open in the user's face at every boot. */
+const AUTO_START_ARGS = ["--autostart"];
+
 export class SettingsStore {
   private current: Settings = DEFAULT_SETTINGS;
   private readonly listeners = new Set<Listener>();
@@ -52,13 +64,28 @@ export class SettingsStore {
   /** Merge a partial update, persist it, and notify listeners. */
   update(patch: Partial<Settings>): Settings {
     const next = normaliseSettings({ ...this.current, ...patch });
-    const changed = (Object.keys(next) as (keyof Settings)[]).some((k) => next[k] !== this.current[k]);
-    if (!changed) return this.current;
+    if (!this.differs(next)) return this.current;
 
     this.current = next;
     this.write();
     for (const listener of this.listeners) listener(next);
     return next;
+  }
+
+  /**
+   * Compare against the current settings.
+   *
+   * `colours` needs an element-wise check: normalisation always returns a fresh array, so comparing
+   * it by identity would report a change on every update and defeat the guard entirely — turning
+   * each slider movement into a disk write and a rebroadcast to every pane.
+   */
+  private differs(next: Settings): boolean {
+    return (Object.keys(next) as (keyof Settings)[]).some((key) => {
+      if (key === "colours") {
+        return next.colours.some((colour, i) => colour !== this.current.colours[i]);
+      }
+      return next[key] !== this.current[key];
+    });
   }
 
   reset(): Settings {
@@ -79,8 +106,10 @@ export class SettingsStore {
   syncAutoStart(): void {
     if (!app.isPackaged) return;
     const enabled = this.current.autoStart;
-    if (app.getLoginItemSettings().openAtLogin !== enabled) {
-      app.setLoginItemSettings({ openAtLogin: enabled, args: ["--autostart"] });
+    // The query matches on executable path and arguments, not on the value name, so it has to be
+    // given the same arguments the entry was registered with or it will never find it.
+    if (app.getLoginItemSettings({ args: AUTO_START_ARGS }).openAtLogin !== enabled) {
+      app.setLoginItemSettings({ openAtLogin: enabled, name: AUTO_START_KEY, args: AUTO_START_ARGS });
     }
   }
 }
