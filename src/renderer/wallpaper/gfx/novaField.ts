@@ -30,15 +30,20 @@
  * # Reaching between screens (Nova II)
  *
  * The connection is not a separate object placed in the gap. It is the bodies themselves: points on
- * the face turned toward the neighbouring screen are drawn out along the line between the two, while
- * their lateral offset is squeezed toward that line. The facing test is raised to a high power, so
- * only the cap actually pointing at the neighbour moves and the rest of the form is untouched.
+ * the face turned toward the neighbouring screen travel out to the midpoint between the two, so both
+ * halves finish in the same place and meet there.
  *
- * The result tapers by construction — the points pulled hardest are also squeezed hardest — so the
- * strand is thick where it leaves the body and thin where the two meet in the middle, and the join
- * back into the body is a smooth flare rather than a seam, because the pull falls off continuously
- * across the cap. Growth is a single scalar: at zero the bodies are ordinary and separate, and as it
- * rises the two strands extend until they overlap.
+ * Two things about the shape are easy to get wrong and both were:
+ *
+ *   - **The cap parameter is remapped linearly, not used as a weight.** Facing is close to uniformly
+ *     distributed over the points, so putting it through a steep curve piles them up at the base and
+ *     leaves the far end starved — thinnest exactly where the two have to meet.
+ *   - **The width narrows quickly and then holds.** Easing it across the whole length gives a funnel
+ *     at the body and a thread in the middle, which is backwards.
+ *
+ * Stretching the same points over several times the ground they started on costs density, so drawn
+ * out points brighten and grow to compensate. Growth is a single scalar: at zero the bodies are
+ * ordinary and separate, and as it rises the two halves extend until they overlap.
  */
 import {
   BufferAttribute,
@@ -70,7 +75,6 @@ const DENSITY_HEADROOM = SETTING_RANGES.density.max;
 
 const KIND_FORM = 0;
 const KIND_AMBIENT = 1;
-const KIND_STRAND = 2;
 
 /**
  * Seconds for the Nova II strands to grow from separate bodies to a complete connection.
@@ -115,19 +119,23 @@ varying float vAlpha;
  * How much of the body is drawn out: only points whose facing exceeds this, roughly a forty-degree
  * cap pointed at the neighbour. Below it a point does not move at all.
  */
-const float REACH_START = 0.62;
-/** How far the opening cap advances toward the neighbour, in radius units. */
-const float NECK_REACH = 0.55;
-
-/** Where the tube begins, in radius units along the axis — inside the body, so it has no visible start. */
-const float STRAND_ROOT = 0.25;
-/** Tube radius at the root and through the middle, as fractions of the body radius. */
-const float STRAND_ROOT_W = 0.44;
-const float STRAND_TIP_W = 0.30;
-/** How far past the midpoint the tip goes, so the two interpenetrate instead of stopping short. */
-const float STRAND_OVERLAP = 0.08;
+/**
+ * How much of the body feeds the connection. Lower takes in a wider cap, which is the only way to
+ * put more material in the strand — its density is however many points are drawn out, spread over
+ * however far they have to go.
+ */
+const float REACH_START = 0.55;
+/** Width the connection narrows to and then holds, as a fraction of the body radius. */
+const float REACH_TAPER = 0.45;
+/** How much of the way out that narrowing happens over. Short, so the base is not a wide funnel. */
+const float REACH_NECK = 0.4;
+/** Radius the far end is held out to, and how far toward it. Full would make the tip a clean ring. */
+const float REACH_HOLD = 0.3;
+const float REACH_HOLD_MIX = 0.65;
+/** How far past the midpoint each tip goes, so the two interpenetrate instead of stopping short. */
+const float REACH_OVERLAP = 0.08;
 /** Amplitude of the slow arc, in radius units. */
-const float STRAND_ARC = 0.25;
+const float REACH_ARC = 0.25;
 
 vec3 turn(vec3 p, float yaw, float pitch) {
   float cy = cos(yaw), sy = sin(yaw);
@@ -175,70 +183,54 @@ void main() {
   vec3 toward = target - centre;
   float span = length(toward);
   vec3 axis = span > 0.001 ? toward / span : vec3(1.0, 0.0, 0.0);
-  // Frame around the axis, shared by the opening cap and the tube so the two agree on where a given
-  // azimuth is and the surfaces line up rather than merely overlapping.
-  vec3 side = normalize(vec3(-axis.y, axis.x, 0.0));
-  vec3 up = cross(axis, side);
 
-  vec3 shape;
-  // How far along the connection this point sits: 0 at the body, 1 at the join. Drives the colour
-  // blend for both the leaning cap and the strand.
+  // Ambient motes hang still in world space while the body turns, so the form reads as rotating
+  // inside a cloud rather than the whole scene spinning.
+  vec3 shape = kind < 0.5 ? turn(offset, yaw, pitch) : offset;
+  // How far along the connection this point sits: 0 at the body, 1 at the join.
   float reach = 0.0;
-  float grow = 1.0;
 
-  if (kind < 1.5) {
-    // Ambient motes hang still in world space while the body turns, so the form reads as rotating
-    // inside a cloud rather than the whole scene spinning.
-    shape = kind < 0.5 ? turn(offset, yaw, pitch) : offset;
+  if (kind < 0.5 && reveal > 0.0 && span > 0.001) {
+    float facing = clamp(dot(normalize(shape), axis), 0.0, 1.0);
 
-    if (kind < 0.5 && reveal > 0.0 && span > 0.001) {
-      float facing = clamp(dot(normalize(shape), axis), 0.0, 1.0);
+    // Remapped to run linearly across the cap rather than used as a weight directly. Facing is close
+    // to uniformly distributed over the points, so putting it through a steep curve piles them up at
+    // the base and leaves nothing at the far end — thinnest exactly where the two have to meet.
+    reach = clamp((facing - REACH_START) / (1.0 - REACH_START), 0.0, 1.0) * reveal;
 
-      reach = clamp((facing - REACH_START) / (1.0 - REACH_START), 0.0, 1.0) * reveal;
+    float along = dot(shape, axis);
+    vec3 lateral = shape - axis * along;
 
-      float along = dot(shape, axis);
-      vec3 lateral = shape - axis * along;
-      float lateralLen = length(lateral);
-      vec3 outward = lateralLen > 0.0001 ? lateral / lateralLen : side;
+    // The tip lands on the midpoint between the two bodies, so both halves finish in the same place
+    // rather than each reaching some distance and being left to overlap by luck.
+    float meeting = (span * 0.5) / radius + REACH_OVERLAP;
 
-      // Open the cap into the mouth of the tube instead of leaving it closed across it.
-      //
-      // A shell is closed everywhere, so it keeps a silhouette edge exactly where the connection
-      // attaches and the body's outline reads straight through the join. Easing each cap point's
-      // distance from the axis toward the tube's root width turns that closed cap into an open ring:
-      // the pole sits on the axis and so travels outward furthest, and the two surfaces become one
-      // continuous skin running into the tube rather than a band laid over a body.
-      shape = axis * (along + reach * NECK_REACH)
-            + outward * mix(lateralLen, STRAND_ROOT_W, reach);
-    }
-  } else {
-    float u = offset.x;
-    reach = u;
+    // Narrow quickly on the way out, then hold that width the rest of the way. Easing the width
+    // across the whole length instead leaves a funnel at the body and a thread in the middle —
+    // widest exactly where it should be slimmest.
+    float width = mix(1.0, REACH_TAPER, smoothstep(0.0, REACH_NECK, reach));
 
-    // Rooted inside the body, so it has no visible start, and ending on the midpoint between the
-    // two, so both strands finish in the same place.
-    float along = mix(STRAND_ROOT, (span * 0.5) / radius + STRAND_OVERLAP, u);
-    // Widest at the root where it meets the opened cap, easing to a width it then holds all the way
-    // to the join. A profile that keeps pinching leaves the middle a thread.
-    float width = mix(STRAND_ROOT_W, STRAND_TIP_W, smoothstep(0.0, 0.5, u));
+    float lateralLen = length(lateral);
+    vec3 lateralDir = lateralLen > 0.0001 ? lateral / lateralLen : vec3(0.0);
 
-    shape = axis * along + (side * offset.y + up * offset.z) * width;
+    // Hold a floor under the width at the far end.
+    //
+    // Which points travel furthest is decided by how squarely they face the neighbour, and those are
+    // the ones nearest the pole — which carry almost no lateral offset of their own. Left to their
+    // own offsets the connection tapers to a wire exactly where the two halves have to meet. Easing
+    // them out to a common radius keeps a thickness through the middle instead.
+    float held = mix(lateralLen * width, REACH_HOLD, smoothstep(0.15, 0.9, reach) * REACH_HOLD_MIX);
 
-    // Reaches outward as it grows, rather than fading up along its whole length at once.
-    float front = reveal * 1.12;
-    grow = 1.0 - smoothstep(front - 0.09, front, u);
+    shape = axis * mix(along, meeting, reach) + lateralDir * held;
+
+    // A slow arc, so the connection is a curve rather than a straight rod.
+    //
+    // It has to be along a world axis with no per-body phase. The two bodies face opposite ways, so
+    // anything expressed relative to their own axis displaces the two tips in opposite directions
+    // and pulls the join apart. The quarter-turn sine flattens it to zero slope at the tip, so the
+    // two arcs meet smoothly instead of meeting at a peak.
+    shape.y += sin(time * 0.13) * sin(reach * 1.5708) * REACH_ARC;
   }
-
-  // A slow arc, so the connection is a curve rather than a straight rod. Applied to the tube only —
-  // the neck belongs to the body and swaying it would tear the join open.
-  //
-  // It has to be along a world axis with no per-body phase. The two bodies face opposite ways, so
-  // anything expressed relative to their own axis displaces the two tips in opposite directions and
-  // pulls the join apart. The quarter-turn sine flattens it to zero slope at the tip, so the two
-  // arcs meet smoothly instead of meeting at a peak, and to zero at the root, so it leaves the body
-  // without a kink.
-  float arc = kind > 1.5 ? reach : 0.0;
-  shape.y += sin(time * 0.13) * sin(arc * 1.5708) * STRAND_ARC;
 
   vec3 local = shape * radius;
   local.x += sin(time * 0.6 + phase) * drift;
@@ -265,16 +257,16 @@ void main() {
   // Lifted toward white because a straight mix of two distant hues lands on mud.
   vec3 joined = mix(cFrom, cNear, 0.5);
   joined += (1.0 - joined) * 0.45;
-  // Only the tube runs to the join colour. The neck is still the body and has to stay its colour, or
-  // the seam reappears as a colour edge where the geometric one was just removed.
-  vColour = mix(rampColour(cFrom, cTo, rampT), joined, kind > 1.5 ? reach : reach * 0.2);
+  vColour = mix(rampColour(cFrom, cTo, rampT), joined, reach);
 
   // Fade out approaching the density cut so points dissolve as the slider moves rather than popping.
-  float fade = grow * (1.0 - smoothstep(densityCut - 0.05, densityCut, rank));
+  float fade = 1.0 - smoothstep(densityCut - 0.05, densityCut, rank);
   // Points lifted by the cursor brighten slightly, which reads as the form responding rather than
-  // simply being shoved.
-  vAlpha = alpha * fade * (1.0 + bulge / max(hoverRadius, 1.0) * 1.5);
-  gl_PointSize = size * pixelScale;
+  // simply being shoved. Drawn-out points brighten and grow too: they cover far more ground than the
+  // cap they came from, so without this the connection is thinner than the body feeding it by
+  // exactly the amount it was stretched.
+  vAlpha = alpha * fade * (1.0 + reach * 1.1) * (1.0 + bulge / max(hoverRadius, 1.0) * 1.5);
+  gl_PointSize = size * pixelScale * (1.0 + reach * 0.55);
 }
 `;
 
@@ -336,8 +328,6 @@ export type NovaLink = "none" | "reach";
 export type NovaConfig = {
   formPoints: number;
   ambientPoints: number;
-  /** Points making up each body's half of the connection, when `link` is `reach`. */
-  strandPoints: number;
   link: NovaLink;
   radius: number;
   ambientSpread: number;
@@ -349,9 +339,6 @@ export const DEFAULT_NOVA_CONFIG: NovaConfig = {
   // Dense on purpose. The form is read entirely from the accumulation of dots, so below roughly ten
   // thousand it stops looking like a body and starts looking like scattered debris.
   formPoints: 15000,
-  // The connection covers roughly as much ground as a body but at a fraction of the width, so it
-  // needs a count of its own rather than a share of the body's.
-  strandPoints: 9000,
   ambientPoints: 1100,
   link: "none",
   radius: 300,
@@ -418,9 +405,7 @@ export class NovaField {
     const alloc = (n: number): number => Math.ceil(n * DENSITY_HEADROOM);
     const formAlloc = alloc(config.formPoints);
     const ambientAlloc = alloc(config.ambientPoints);
-    // A strand only exists where there is a neighbour to reach for.
-    const strandAlloc = config.link === "reach" && bodies.length > 1 ? alloc(config.strandPoints) : 0;
-    const count = Math.max(1, bodies.length) * (formAlloc + ambientAlloc + strandAlloc);
+    const count = Math.max(1, bodies.length) * (formAlloc + ambientAlloc);
 
     const centres = new Float32Array(count * 3);
     const targets = new Float32Array(count * 3);
@@ -509,37 +494,6 @@ export class NovaField {
         ranks[i] = n / ambientAlloc;
       }
 
-      for (let n = 0; n < strandAlloc; n++, i++) {
-        const i3 = i * 3;
-        centres[i3] = body.x;
-        centres[i3 + 1] = body.y;
-        targets[i3] = neighbour ? neighbour.x : body.x;
-        targets[i3 + 1] = neighbour ? neighbour.y : body.y;
-
-        const u = random.next();
-        const theta = random.next() * Math.PI * 2;
-
-        // A shell, on exactly the terms the body uses, because that is what makes the body read as
-        // solid: sight lines graze the surface near the silhouette and accumulate, so a shell shows
-        // bright rims and a filled volume shows a flat band. Same stray fraction too, so the tube
-        // frays at its edge instead of ending on a razor line the body never has.
-        const stray = random.next();
-        const shell = stray > 0.97 ? 1 + random.next() * 0.4 : 0.9 + Math.pow(random.next(), 0.5) * 0.1;
-        const lumps = 1 + wobble(u * 5.5, Math.cos(theta) * 1.6, Math.sin(theta) * 1.6) * 0.14;
-        const radial = shell * lumps;
-
-        offsets[i3] = u;
-        offsets[i3 + 1] = Math.cos(theta) * radial;
-        offsets[i3 + 2] = Math.sin(theta) * radial;
-
-        rampTs[i] = random.next();
-        kinds[i] = KIND_STRAND;
-        indices[i] = b;
-        sizes[i] = random.range(1.1, 4.2);
-        alphas[i] = random.range(0.4, 0.95);
-        phases[i] = random.range(0, Math.PI * 2);
-        ranks[i] = n / strandAlloc;
-      }
     }
 
     this.geometry = new BufferGeometry();
