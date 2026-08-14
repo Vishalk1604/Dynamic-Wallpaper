@@ -88,8 +88,14 @@ Once running the app lives in the system tray — there is no window unless you 
 npm run dev
 ```
 
-Useful environment variables: `DW_HUD=1` overlays per-pane diagnostics, `DW_CAPTURE=1` renders each pane
-to a PNG in the user data folder without minimising your windows.
+Useful environment variables:
+
+| Variable | Effect |
+| --- | --- |
+| `DW_HUD=1` | Overlays per-pane diagnostics: resolution, origin, style, frame rate, GPU |
+| `DW_CAPTURE=1` | Renders each pane to a PNG in the user data folder, without minimising your windows |
+| `DW_CAPTURE_DELAY=<ms>` | How long to wait before that capture. Styles that build up over time need longer than the 4s default |
+| `DW_ADOPT_ICON_HOST=1` | Adopts Explorer's icon host so icons layer above the wallpaper. Off by default — see below |
 
 ## Settings
 
@@ -98,6 +104,43 @@ picker per screen and multipliers for density, size, particle size, brightness, 
 settings a style has no use for are hidden rather than left inert.
 
 Settings are written atomically on change and survive an upgrade or reinstall.
+
+## Tuning the shapes
+
+The sliders scale each style; the shapes themselves are constants at the top of the style's own file,
+so they can be read and changed without following anything through the code. Edit, `npm run dev`, look.
+
+### Nova II — the connection between screens
+
+In [novaField.ts](src/renderer/wallpaper/gfx/novaField.ts), as GLSL constants above the vertex shader.
+All are fractions of the body radius unless noted, and none of them interact:
+
+| Constant | Default | Effect |
+| --- | --- | --- |
+| `REACH_START` | `0.55` | How much of the body feeds the connection, as a facing cutoff. **Lower is denser** — it is the only supply of material — at the cost of deforming more of the body |
+| `REACH_TAPER` | `0.45` | The width it holds through the middle |
+| `REACH_NECK` | `0.4` | How much of the trip the narrowing happens over. Raise it and the body ends in a funnel |
+| `REACH_HOLD` | `0.3` | Floor under the width at the meeting point. Without it the connection tapers to a wire exactly where the two halves meet, because the points that travel furthest are the ones nearest the pole and they carry almost no lateral offset of their own |
+| `REACH_HOLD_MIX` | `0.65` | How firmly that floor is applied. At `1.0` the far end becomes a clean ring |
+| `REACH_OVERLAP` | `0.08` | How far past the midpoint each half goes, so the two interpenetrate rather than stopping short |
+| `REACH_ARC` | `0.25` | How much it curves. Zero is a straight rod |
+| `GROW_SECONDS` | `50` | Seconds to go from separate bodies to a complete connection, scaled by the flow-speed setting |
+
+Two of these are worth understanding before turning them, because they behave differently from how
+they read:
+
+- **Density is set by `REACH_START`, not by the width.** The connection is made of the body's own
+  points, so widening it spreads the same material thinner. To make it denser, lower the cutoff.
+- **`REACH_HOLD` exists because of which points travel.** How far a point goes is decided by how
+  squarely it faces the neighbour, so the far end is built from points that started near the pole —
+  exactly the ones with no lateral offset to give it width.
+
+### The bodies
+
+`DEFAULT_NOVA_CONFIG` in the same file: `formPoints` (below roughly ten thousand a body stops reading
+as a form and starts reading as scattered debris), `ambientPoints`, `radius`, `ambientSpread`. The
+stretch ratio and tilt are in the constructor — the stretch has to be pushed well past what looks
+right in the numbers, because rotation foreshortens the long axis for most of the cycle.
 
 ## Roadmap
 
